@@ -1,5 +1,5 @@
 // index.js
-const { Telegraf } = require('telegraf');
+const { Telegraf, Markup } = require('telegraf'); // Import Markup for buttons
 const { exec, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -14,8 +14,8 @@ if (!fs.existsSync(uploadsDir)) {
 // Store for managed bots
 const managedBots = new Map();
 
-// Track which bot the user is about to send requirements for
-let awaitingRequirementsFor = null;
+// Track state for multi-step interactions
+const userStates = {}; // userId -> { step: '...', data: {...} }
 
 // Initialize Express app for health checks
 const app = express();
@@ -43,177 +43,22 @@ if (!BOT_TOKEN) {
 
 const bot = new Telegraf(BOT_TOKEN);
 
-// Command: Start
-bot.start((ctx) => {
-    const welcomeMessage = `🤖 Welcome to the Telegram Master Bot!
-
-I can manage and run Python bots for you.
-
-Commands:
-/upload - Upload a Python bot (.py file)
-/uploadreq <bot_name> - Upload requirements.txt for a specific bot
-/list - List all managed bots
-/startbot <bot_name> - Start a specific bot
-/stopbot <bot_name> - Stop a specific bot
-/logs <bot_name> - View logs for a specific bot
-/help - Show this help message
-
-How to use:
-1. Send me your bot's .py file using /upload.
-2. (Optional) If your bot needs packages, create a requirements.txt file locally, then use /uploadreq <bot_name> followed by sending the requirements.txt file.
-3. Use /startbot <bot_name> to run your bot. I'll install requirements first if provided.
-4. Use /stopbot <bot_name> to stop it.
-5. Check logs with /logs <bot_name>.`;
-    ctx.reply(welcomeMessage);
-});
-
-// Command: Help
-bot.help((ctx) => {
-    const helpMessage = `🤖 Telegram Master Bot - Help
-
-Commands:
-/upload - Upload a Python bot (.py file)
-/uploadreq <bot_name> - Upload requirements.txt for a specific bot
-/list - List all managed bots
-/startbot <bot_name> - Start a specific bot
-/stopbot <bot_name> - Stop a specific bot
-/logs <bot_name> - View logs for a specific bot
-/help - Show this help message
-
-Steps:
-1. Upload your Python bot script (.py) using /upload.
-2. (Optional) If your bot needs external Python packages:
-   a. Prepare a requirements.txt file listing the packages (e.g., telegraf==4.12.2).
-   b. Use /uploadreq <bot_name> (replace <bot_name> with your bot's name, without .py).
-   c. Send the requirements.txt file when prompted.
-3. Start your bot using /startbot <bot_name>. The master bot will automatically install packages from requirements.txt (if provided) before starting the script.
-4. Stop your bot using /stopbot <bot_name>.
-5. View your bot's output/logs using /logs <bot_name>.`;
-    ctx.reply(helpMessage);
-});
-
-// Command: Upload bot
-bot.command('upload', (ctx) => {
-    ctx.reply('📁 Please send me your Python bot file (.py) and I\'ll manage it for you!');
-});
-
-// Command: Upload requirements
-bot.command('uploadreq', (ctx) => {
-    const botName = ctx.message.text.split(' ')[1];
-
-    if (!botName) {
-        return ctx.reply('⚠️ Usage: /uploadreq <bot_name>\nUse /list to see available bots.');
-    }
-
-    const botInfo = managedBots.get(botName);
-    if (!botInfo) {
-        return ctx.reply(`❌ Bot "${botName}" not found. Use /list to see available bots.`);
-    }
-
-    awaitingRequirementsFor = botName;
-    ctx.reply(`✅ Awaiting requirements.txt for bot '${botName}'. Please send the file now.`);
-});
-
-// Handle document uploads
-bot.on('document', async (ctx) => {
-    try {
-        const document = ctx.message.document;
-        const fileId = document.file_id;
-        const fileName = document.file_name;
-
-        // Download file
-        const fileLink = await ctx.telegram.getFileLink(fileId);
-        const response = await fetch(fileLink);
-        const buffer = await response.buffer();
-
-        // Determine file type and handle accordingly
-        if (fileName.endsWith('.py')) {
-            const botName = fileName.replace('.py', '');
-            const filePath = path.join(uploadsDir, fileName);
-            const requirementsPath = path.join(uploadsDir, `${botName}_requirements.txt`);
-
-            fs.writeFileSync(filePath, buffer);
-
-            // Store bot info, including path for potential requirements.txt
-            managedBots.set(botName, {
-                name: botName,
-                fileName: fileName,
-                filePath: filePath,
-                requirementsPath: requirementsPath, // Add requirements path
-                process: null,
-                logs: [],
-                status: 'stopped'
-            });
-
-            // Create an empty placeholder requirements.txt
-            if (!fs.existsSync(requirementsPath)) {
-                fs.writeFileSync(requirementsPath, '');
-            }
-
-            awaitingRequirementsFor = null; // Reset state after .py upload
-            ctx.reply(`✅ Bot "${botName}" uploaded successfully!\n\nUse /startbot ${botName} to start it.\nUse /uploadreq ${botName} if you need to provide requirements.`);
-        } else if (fileName === 'requirements.txt') {
-            if (!awaitingRequirementsFor) {
-                return ctx.reply('❓ I\'m not expecting a requirements.txt file right now. Use /uploadreq <bot_name> first.');
-            }
-
-            const targetBotName = awaitingRequirementsFor;
-            const botInfo = managedBots.get(targetBotName);
-
-            if (!botInfo) {
-                awaitingRequirementsFor = null;
-                return ctx.reply(`❌ Error: Target bot '${targetBotName}' not found for requirements.`);
-            }
-
-            // Save requirements.txt to the specific path for this bot
-            fs.writeFileSync(botInfo.requirementsPath, buffer);
-
-            awaitingRequirementsFor = null; // Reset state after successful upload
-            ctx.reply(`✅ requirements.txt successfully linked to bot "${targetBotName}"!\n\nYou can now start the bot with /startbot ${targetBotName}.`);
-        } else {
-            return ctx.reply('⚠️ Please upload only Python files (.py) or a requirements.txt file (after using /uploadreq <bot_name>).');
-        }
-
-    } catch (error) {
-        console.error('Upload error:', error);
-        awaitingRequirementsFor = null; // Reset state on error
-        ctx.reply('❌ Error uploading file. Please try again.');
-    }
-});
-
-
-// Command: List bots
-bot.command('list', (ctx) => {
-    if (managedBots.size === 0) {
-        return ctx.reply('📭 No bots uploaded yet. Use /upload to add bots.');
-    }
-
-    let message = '🤖 Managed Bots:\n\n';
-    managedBots.forEach((botInfo, botName) => {
-        message += `🔹 ${botName} - Status: ${botInfo.status.toUpperCase()}\n`;
-    });
-
-    ctx.reply(message);
-});
-
 // --- Helper Function for Pip Install ---
-function installRequirements(requirementsPath, botName) { // Added botName for logging
+function installRequirements(requirementsPath, botName) {
     return new Promise((resolve, reject) => {
-        // Check if file exists and is not empty
         if (!fs.existsSync(requirementsPath)) {
-             console.log(`[StartBot: ${botName}] Requirements file not found: ${requirementsPath}`);
-             resolve(); // Resolve if no requirements file, meaning nothing to install
-             return;
+            console.log(`[StartBot: ${botName}] Requirements file not found or empty: ${requirementsPath}`);
+            resolve();
+            return;
         }
         const stats = fs.statSync(requirementsPath);
         if (stats.size === 0) {
-             console.log(`[StartBot: ${botName}] Requirements file is empty: ${requirementsPath}`);
-             resolve(); // Resolve if empty, meaning nothing to install
-             return;
+            console.log(`[StartBot: ${botName}] Requirements file is empty: ${requirementsPath}`);
+            resolve();
+            return;
         }
 
         console.log(`[StartBot: ${botName}] Installing requirements from: ${requirementsPath}`);
-        // Use 'pip3' for clarity, and quote the path in case of spaces
         const pipProcess = exec(`pip3 install -r "${requirementsPath}"`, { cwd: uploadsDir });
 
         let stdoutData = '';
@@ -232,10 +77,9 @@ function installRequirements(requirementsPath, botName) { // Added botName for l
         pipProcess.on('close', (code) => {
             if (code === 0) {
                 console.log(`[StartBot: ${botName}] Successfully installed packages from ${requirementsPath}`);
-                resolve(stdoutData); // Resolve with stdout on success
+                resolve(stdoutData);
             } else {
                 console.error(`[StartBot: ${botName}] Failed to install packages from ${requirementsPath}. Exit code: ${code}`);
-                // Include stderr in the rejection for better error reporting
                 reject(new Error(`pip install failed with exit code ${code}\nStderr:\n${stderrData}`));
             }
         });
@@ -248,8 +92,387 @@ function installRequirements(requirementsPath, botName) { // Added botName for l
 }
 // --- End Helper Function ---
 
-// Command: Start bot
-bot.command('startbot', async (ctx) => { // Make function async
+// --- State Management Helpers ---
+function setUserState(userId, step, data = {}) {
+    userStates[userId] = { step, data };
+}
+
+function getUserState(userId) {
+    return userStates[userId];
+}
+
+function clearUserState(userId) {
+    delete userStates[userId];
+}
+// --- End State Management Helpers ---
+
+// Command: Start
+bot.start((ctx) => {
+    const welcomeMessage = `🤖 Welcome to the Telegram Master Bot!
+
+I can manage and run Python bots for you.
+
+Commands:
+/create_bot - Start creating a new bot (upload file or paste code)
+/req - Add requirements.txt for an existing bot
+/list - List all managed bots
+/startbot <bot_name> - Start a specific bot
+/stopbot <bot_name> - Stop a specific bot
+/logs <bot_name> - View logs for a specific bot
+/help - Show this help message
+
+Get started by using /create_bot!`;
+    ctx.reply(welcomeMessage);
+});
+
+// Command: Help
+bot.help((ctx) => {
+    const helpMessage = `🤖 Telegram Master Bot - Help
+
+Commands:
+/create_bot - Initiates the process to add a new Python bot.
+/req - Initiates the process to add requirements for an existing bot.
+/list - Lists all bots currently managed.
+/startbot <bot_name> - Starts a specific bot (installs requirements if provided).
+/stopbot <bot_name> - Stops a running bot.
+/logs <bot_name> - Displays the last logs for a bot.
+/help - Shows this help message.
+
+Steps to add a bot:
+1. Use /create_bot.
+2. Enter a unique name for your new bot.
+3. Choose whether to upload a .py file or paste code directly.
+4. (Optional) Later, use /req <bot_name> to provide requirements (upload file or paste text).
+5. Start your bot with /startbot <bot_name>.`;
+    ctx.reply(helpMessage);
+});
+
+// --- NEW FLOW: /create_bot ---
+bot.command('create_bot', (ctx) => {
+    const userId = ctx.from.id;
+    setUserState(userId, 'AWAITING_BOT_NAME');
+    ctx.reply('🔤 Please enter a unique name for your new bot:');
+});
+
+// --- NEW FLOW: /req ---
+bot.command('req', (ctx) => {
+    const userId = ctx.from.id;
+    // Check if there are any bots first
+    if (managedBots.size === 0) {
+        return ctx.reply('📭 No bots created yet. Use /create_bot to add one first.');
+    }
+
+    // Prompt user for the bot name
+    setUserState(userId, 'AWAITING_BOT_NAME_FOR_REQ');
+    ctx.reply('🔤 Please enter the name of the bot you want to add requirements for:');
+});
+// --- End NEW FLOW: /req ---
+
+// Handle text input based on user state
+bot.on('text', async (ctx) => {
+    const userId = ctx.from.id;
+    const state = getUserState(userId);
+    const messageText = ctx.message.text.trim();
+
+    if (!state) {
+        // If user sends text outside a flow, just acknowledge or ignore
+        ctx.reply("Send /create_bot to start adding a new bot or /req to add requirements.");
+        return;
+    }
+
+    // --- Handle receiving bot name for /create_bot ---
+    if (state.step === 'AWAITING_BOT_NAME') {
+        const botName = messageText.replace(/[^a-zA-Z0-9_-]/g, '_'); // Sanitize name
+
+        if (managedBots.has(botName)) {
+             ctx.reply(`❌ A bot named "${botName}" already exists. Please choose a different name:`);
+             return; // Stay in the same state
+        }
+
+        setUserState(userId, 'AWAITING_BOT_SOURCE', { botName });
+        await ctx.reply(`📝 How would you like to provide the code for "${botName}"?`,
+            Markup.inlineKeyboard([
+                Markup.button.callback('📤 Upload .py File', 'upload_file'),
+                Markup.button.callback('✏️ Paste Code Text', 'paste_code')
+            ])
+        );
+        return;
+    }
+    // --- End Handle receiving bot name for /create_bot ---
+
+    // --- Handle receiving code text for /create_bot ---
+    if (state.step === 'AWAITING_CODE_TEXT') {
+        const botName = state.data.botName;
+        const fileName = `${botName}.py`;
+        const filePath = path.join(uploadsDir, fileName);
+        const requirementsPath = path.join(uploadsDir, `${botName}_requirements.txt`);
+
+        try {
+            fs.writeFileSync(filePath, messageText);
+            console.log(`[Text Code] Code saved to ${filePath}`);
+
+            managedBots.set(botName, {
+                name: botName,
+                fileName: fileName,
+                filePath: filePath,
+                requirementsPath: requirementsPath,
+                process: null,
+                logs: [],
+                status: 'stopped'
+            });
+
+            if (!fs.existsSync(requirementsPath)) {
+                fs.writeFileSync(requirementsPath, '');
+            }
+
+            clearUserState(userId);
+            ctx.reply(`✅ Python code received and bot "${botName}" created successfully!\n\nYou can now:\n- Use /startbot ${botName} to run it.\n- Use /req ${botName} to provide requirements.`);
+        } catch (error) {
+            console.error('[Text Code] Error saving code:', error);
+            clearUserState(userId);
+            ctx.reply('❌ An error occurred while saving the code. Please try creating the bot again.');
+        }
+        return;
+    }
+    // --- End Handle receiving code text for /create_bot ---
+
+    // --- Handle receiving bot name for /req ---
+    if (state.step === 'AWAITING_BOT_NAME_FOR_REQ') {
+        const targetBotName = messageText;
+
+        // Check if the bot exists
+        const botInfo = managedBots.get(targetBotName);
+        if (!botInfo) {
+             clearUserState(userId); // Clear state on error
+             return ctx.reply(`❌ Bot "${targetBotName}" not found. Use /list to see available bots.`);
+        }
+
+        // Bot found, ask for input method
+        setUserState(userId, 'AWAITING_REQ_SOURCE', { botName: targetBotName });
+        await ctx.reply(`📝 How would you like to provide the requirements for "${targetBotName}"?`,
+            Markup.inlineKeyboard([
+                Markup.button.callback('📤 Upload requirements.txt File', 'upload_req_file'),
+                Markup.button.callback('✏️ Paste Requirements Text', 'paste_req_text')
+            ])
+        );
+        return;
+    }
+    // --- End Handle receiving bot name for /req ---
+
+    // --- Handle receiving requirements text for /req ---
+    if (state.step === 'AWAITING_REQ_TEXT') {
+        const targetBotName = state.data.botName;
+        const botInfo = managedBots.get(targetBotName);
+
+        if (!botInfo) {
+             clearUserState(userId);
+             return ctx.reply(`❌ Error: Target bot '${targetBotName}' not found.`);
+        }
+
+        try {
+            // Treat the pasted text as the content of requirements.txt
+            fs.writeFileSync(botInfo.requirementsPath, messageText);
+            console.log(`[Req Text] Requirements text saved to ${botInfo.requirementsPath}`);
+            clearUserState(userId);
+            ctx.reply(`✅ Requirements text saved for bot "${targetBotName}"!\n\nYou can now start the bot with /startbot ${targetBotName}.`);
+        } catch (error) {
+            console.error('[Req Text] Error saving requirements:', error);
+            clearUserState(userId);
+            ctx.reply('❌ An error occurred while saving the requirements text.');
+        }
+        return;
+    }
+    // --- End Handle receiving requirements text for /req ---
+
+    // Handle other text messages (e.g., if user types something unexpected during a flow)
+    ctx.reply("Please follow the prompts or use /help for commands.");
+});
+
+// Handle callback queries (button presses)
+bot.on('callback_query', async (ctx) => {
+    const userId = ctx.from.id;
+    const state = getUserState(userId);
+    const data = ctx.callbackQuery.data; // e.g., 'upload_file', 'paste_code', 'upload_req_file', 'paste_req_text'
+
+    // Answer the callback query to remove loading indicator
+    await ctx.answerCbQuery();
+
+    // --- Handle button press for /create_bot source ---
+    if (state && state.step === 'AWAITING_BOT_SOURCE') {
+        const botName = state.data.botName;
+        clearUserState(userId); // Clear state as we proceed
+
+        if (data === 'upload_file') {
+            setUserState(userId, 'AWAITING_FILE_UPLOAD', { botName });
+            await ctx.editMessageText(`📤 Okay, please send the Python file (.py) for bot "${botName}".`);
+        } else if (data === 'paste_code') {
+            setUserState(userId, 'AWAITING_CODE_TEXT', { botName });
+            await ctx.editMessageText(`✏️ Please paste the Python code for bot "${botName}".`);
+        }
+        return;
+    }
+    // --- End Handle button press for /create_bot source ---
+
+    // --- Handle button press for /req source ---
+    if (state && state.step === 'AWAITING_REQ_SOURCE') {
+        const targetBotName = state.data.botName;
+        // Clear state as we proceed
+        clearUserState(userId);
+
+        if (data === 'upload_req_file') {
+            setUserState(userId, 'AWAITING_REQUIREMENTS_UPLOAD', { botName: targetBotName }); // Reuse existing state
+            await ctx.editMessageText(`📤 Okay, please send the requirements.txt file for bot "${targetBotName}".`);
+        } else if (data === 'paste_req_text') {
+            setUserState(userId, 'AWAITING_REQ_TEXT', { botName: targetBotName });
+            await ctx.editMessageText(`✏️ Please paste the requirements (one package per line, e.g., 'telegraf==4.12.2') for bot "${targetBotName}".`);
+        }
+        return; // Handled /req source selection
+    }
+    // --- End Handle button press for /req source ---
+
+    // Ignore callback if not in the expected state
+    // ctx.reply("Unexpected button press. Please start a new action.");
+});
+
+// Handle document uploads based on user state
+bot.on('document', async (ctx) => {
+    const userId = ctx.from.id;
+    const state = getUserState(userId);
+
+    // --- Handle bot file upload for /create_bot ---
+    if (state && state.step === 'AWAITING_FILE_UPLOAD') {
+        try {
+            const document = ctx.message.document;
+            const fileId = document.file_id;
+            const fileName = document.file_name;
+
+            if (!fileName.endsWith('.py')) {
+                 ctx.reply('⚠️ Please upload only Python files (.py).');
+                 // Don't clear state, let user try again
+                 return;
+            }
+
+            const botName = state.data.botName;
+            const expectedFileName = `${botName}.py`;
+            // Optional: Enforce filename or just use the uploaded one. Let's use the uploaded one.
+            // if (fileName !== expectedFileName) { ... warn or adjust ... }
+
+            const filePath = path.join(uploadsDir, fileName);
+            const requirementsPath = path.join(uploadsDir, `${botName}_requirements.txt`);
+
+            const fileUrl = await ctx.telegram.getFileLink(fileId);
+            console.log(`[File Upload] Attempting to download from: ${fileUrl}`);
+
+            let buffer;
+            try {
+                const response = await fetch(fileUrl);
+                if (!response.ok) {
+                    throw new Error(`Failed to fetch file: ${response.status} ${response.statusText}`);
+                }
+                const arrayBuffer = await response.arrayBuffer();
+                buffer = Buffer.from(arrayBuffer);
+                console.log(`[File Upload] File downloaded successfully, size: ${buffer.length} bytes.`);
+            } catch (fetchError) {
+                console.error(`[File Upload] Error fetching file from Telegram:`, fetchError);
+                throw new Error(`Could not download file from Telegram: ${fetchError.message}`);
+            }
+
+            fs.writeFileSync(filePath, buffer);
+            console.log(`[File Upload] File written to disk: ${filePath}`);
+
+            managedBots.set(botName, {
+                name: botName,
+                fileName: fileName,
+                filePath: filePath,
+                requirementsPath: requirementsPath,
+                process: null,
+                logs: [],
+                status: 'stopped'
+            });
+
+            if (!fs.existsSync(requirementsPath)) {
+                fs.writeFileSync(requirementsPath, '');
+            }
+
+            clearUserState(userId);
+            ctx.reply(`✅ Bot file "${fileName}" uploaded and bot "${botName}" created successfully!\n\nYou can now:\n- Use /startbot ${botName} to run it.\n- Use /req ${botName} to provide requirements.`);
+
+        } catch (error) {
+            console.error('[File Upload] Error:', error);
+            clearUserState(userId); // Clear state on error
+            ctx.reply('❌ Error processing the uploaded file. Please try creating the bot again.');
+        }
+        return; // Handled bot file upload
+    }
+    // --- End Handle bot file upload for /create_bot ---
+
+    // --- Handle requirements.txt upload for /req ---
+    if (state && state.step === 'AWAITING_REQUIREMENTS_UPLOAD') {
+         const targetBotName = state.data.botName;
+         clearUserState(userId); // Clear state immediately
+
+         const botInfo = managedBots.get(targetBotName);
+         if (!botInfo) {
+             return ctx.reply(`❌ Error: Target bot '${targetBotName}' not found for requirements.`);
+         }
+
+         const document = ctx.message.document;
+         if (document.file_name !== 'requirements.txt') {
+              return ctx.reply('⚠️ Please upload a file named exactly "requirements.txt".');
+         }
+
+         try {
+             const fileId = document.file_id;
+             const fileUrl = await ctx.telegram.getFileLink(fileId);
+             console.log(`[Req Upload] Attempting to download from: ${fileUrl}`);
+
+             let buffer;
+             try {
+                 const response = await fetch(fileUrl);
+                 if (!response.ok) {
+                     throw new Error(`Failed to fetch file: ${response.status} ${response.statusText}`);
+                 }
+                 const arrayBuffer = await response.arrayBuffer();
+                 buffer = Buffer.from(arrayBuffer);
+                 console.log(`[Req Upload] File downloaded successfully, size: ${buffer.length} bytes.`);
+             } catch (fetchError) {
+                 console.error(`[Req Upload] Error fetching file from Telegram:`, fetchError);
+                 throw new Error(`Could not download file from Telegram: ${fetchError.message}`);
+             }
+
+             fs.writeFileSync(botInfo.requirementsPath, buffer);
+             console.log(`[Req Upload] File written to disk: ${botInfo.requirementsPath}`);
+             ctx.reply(`✅ requirements.txt successfully uploaded and linked to bot "${targetBotName}"!\n\nYou can now start the bot with /startbot ${targetBotName}.`);
+         } catch (error) {
+             console.error('[Req Upload] Error:', error);
+             ctx.reply('❌ Error processing the uploaded requirements.txt file.');
+         }
+         return; // Handled requirements upload
+    }
+    // --- End Handle requirements.txt upload for /req ---
+
+    // Ignore document if not expecting an upload in a known state
+    ctx.reply("Please use /create_bot or /req first if you want to add a file.");
+});
+
+// --- REMAINING COMMANDS (unchanged logic, updated messages) ---
+
+// Command: List bots
+bot.command('list', (ctx) => {
+    if (managedBots.size === 0) {
+        return ctx.reply('📭 No bots created yet. Use /create_bot to add one.');
+    }
+
+    let message = '🤖 Managed Bots:\n\n';
+    managedBots.forEach((botInfo, botName) => {
+        message += `🔹 ${botName} - Status: ${botInfo.status.toUpperCase()}\n`;
+    });
+
+    ctx.reply(message);
+});
+
+// Command: Start bot (mostly unchanged, minor logging update)
+bot.command('startbot', async (ctx) => {
     const botName = ctx.message.text.split(' ')[1];
 
     if (!botName) {
@@ -266,25 +489,19 @@ bot.command('startbot', async (ctx) => { // Make function async
     }
 
     try {
-        // --- Install Requirements First ---
         const installingMsg = await ctx.reply(`⏳ Installing requirements for "${botName}" (if any)...`);
         try {
-            await installRequirements(botInfo.requirementsPath, botName); // Wait for pip install, pass botName
-            // Edit the previous message instead of sending a new one
+            await installRequirements(botInfo.requirementsPath, botName);
             await ctx.telegram.editMessageText(ctx.chat.id, installingMsg.message_id, undefined, `✅ Requirements installed (or none found) for "${botName}".`);
         } catch (installError) {
             console.error(`[StartBot] Error installing requirements for ${botName}:`, installError);
-            // Send detailed error to user (be cautious with exposing internal errors)
             const errorMessage = installError.message.length > 300 ?
                 installError.message.substring(0, 300) + '... (truncated)' :
                 installError.message;
-            // Edit the previous message to show the error
             await ctx.telegram.editMessageText(ctx.chat.id, installingMsg.message_id, undefined, `❌ Failed to install requirements for "${botName}". Bot not started.\nError: ${errorMessage}`);
-            return; // Stop the start process if install failed
+            return;
         }
-        // --- End Install Requirements ---
 
-        // Start the Python bot
         console.log(`[StartBot: ${botName}] Starting Python bot: ${botInfo.filePath}`);
         const pythonProcess = spawn('python3', [botInfo.filePath], {
             cwd: uploadsDir
@@ -292,23 +509,20 @@ bot.command('startbot', async (ctx) => { // Make function async
 
         botInfo.process = pythonProcess;
         botInfo.status = 'running';
-        botInfo.logs = []; // Clear previous logs
+        botInfo.logs = [];
 
-        // Capture stdout
         pythonProcess.stdout.on('data', (data) => {
             const log = data.toString();
             botInfo.logs.push(`[STDOUT] ${log}`);
             console.log(`[${botName}] ${log}`);
         });
 
-        // Capture stderr
         pythonProcess.stderr.on('data', (data) => {
             const log = data.toString();
             botInfo.logs.push(`[STDERR] ${log}`);
             console.error(`[${botName}] ${log}`);
         });
 
-        // Handle process exit
         pythonProcess.on('close', (code) => {
             botInfo.status = 'stopped';
             botInfo.process = null;
@@ -342,7 +556,7 @@ bot.command('stopbot', (ctx) => {
 
     try {
         if (botInfo.process) {
-            botInfo.process.kill('SIGTERM'); // Use SIGTERM for graceful shutdown
+            botInfo.process.kill('SIGTERM');
             botInfo.process = null;
         }
         botInfo.status = 'stopped';
@@ -370,12 +584,10 @@ bot.command('logs', (ctx) => {
         return ctx.reply(`📭 No logs available for "${botName}".`);
     }
 
-    // Get last 25 logs for potentially longer output
     const recentLogs = botInfo.logs.slice(-25);
     let message = `📋 Logs for ${botName}:\n\n`;
     message += recentLogs.join('\n');
 
-    // Split very long messages if necessary
     if (message.length > 4000) {
         message = message.substring(0, 4000) + '\n... (truncated)';
     }
@@ -386,6 +598,8 @@ bot.command('logs', (ctx) => {
 // Error handling for the bot itself
 bot.catch((err, ctx) => {
     console.error('Bot error:', err);
+    // Clear user state on bot error to prevent getting stuck
+    clearUserState(ctx.from.id);
     ctx.reply('❌ An unexpected error occurred in the master bot. Please try your command again.');
 });
 
@@ -394,7 +608,7 @@ bot.launch();
 
 console.log('🚀 Telegram Master Bot started!');
 
-// Graceful shutdown for the master bot process
+// Graceful shutdown
 process.once('SIGINT', () => {
     console.log('Received SIGINT. Shutting down gracefully...');
     bot.stop('SIGINT');
