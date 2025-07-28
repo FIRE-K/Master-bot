@@ -1,3 +1,4 @@
+// index.js
 const { Telegraf, Markup } = require('telegraf'); // Import Markup for buttons
 const { exec, spawn } = require('child_process');
 const fs = require('fs');
@@ -21,7 +22,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.get('/', (req, res) => {
-    res.send('Telegram Master Bot is running!');
+    res.send('MASTER Bot is running!');
 });
 
 app.get('/health', (req, res) => {
@@ -36,6 +37,7 @@ app.listen(PORT, '0.0.0.0', () => {
 // Initialize Telegraf bot
 const BOT_TOKEN = process.env.BOT_TOKEN;
 if (!BOT_TOKEN) {
+    // This is a critical startup error, cannot send to Telegram
     console.error('Please set BOT_TOKEN environment variable');
     process.exit(1);
 }
@@ -114,7 +116,7 @@ async function stopBot(botName) {
             botInfo.process = null;
         } catch (error) {
             console.error(`[StopBotHelper] Error killing process for ${botName}:`, error);
-            // Continue with deletion even if kill fails
+            // Continue with potential deletion even if kill fails
         }
     }
     if (botInfo) {
@@ -125,16 +127,15 @@ async function stopBot(botName) {
 
 // Command: Start
 bot.start((ctx) => {
-    const welcomeMessage = `🤖 Welcome to the Telegram Master Bot!
-
-I can manage and run Python bots for you. View '/help' for more. \\
-Get started by using '/create_bot <your_bot_name>!'`;
+    const welcomeMessage = `🤖 Welcome to the MASTER Bot!
+I can manage and run Python bots for you. View /help for more.
+Get started by using /create_bot <your_bot_name>!`;
     ctx.reply(welcomeMessage);
 });
 
 // Command: Help
 bot.help((ctx) => {
-    const helpMessage = `🤖 Telegram Master Bot - Help
+    const helpMessage = `🤖 MASTER Bot - Help
 
 Commands:
 /create_bot <name> - Initiates the process to add a new Python bot with the given name.
@@ -142,6 +143,7 @@ Commands:
 /start_bot <name> - Starts a specific bot (installs requirements if provided).
 /stop_bot <name> - Stops a running bot.
 /req <name> - Initiates the process to add requirements for an existing bot.
+/source <name> - Sends the source code and requirements for a bot.
 /logs <name> - Displays the last logs for a bot.
 /help - Shows this help message.
 
@@ -153,7 +155,57 @@ Steps to add a bot:
     ctx.reply(helpMessage);
 });
 
-// --- NEW FLOW: /create_bot <name> ---
+// --- NEW COMMAND: /source <bot> ---
+bot.command('source', async (ctx) => {
+    const targetBotName = ctx.message.text.split(' ')[1];
+
+    if (!targetBotName) {
+        return ctx.reply('⚠️ Usage: /source <bot_name>');
+    }
+
+    const botInfo = managedBots.get(targetBotName);
+    if (!botInfo) {
+        return ctx.reply(`❌ Bot "${targetBotName}" not found.`);
+    }
+
+    try {
+        let sourceMessage = `📄 Source for bot: ${targetBotName}\n\n`;
+
+        // --- Send Bot Code ---
+        let botCodeContent = "🚫 Code file not found.";
+        if (fs.existsSync(botInfo.filePath)) {
+            try {
+                botCodeContent = fs.readFileSync(botInfo.filePath, 'utf8');
+            } catch (readError) {
+                console.error(`[Source] Error reading bot file ${botInfo.filePath}:`, readError);
+                botCodeContent = `❌ Error reading code file: ${readError.message}`;
+            }
+        }
+        sourceMessage += `🔹 Code (${botInfo.fileName}):\n\`\`\`python\n${botCodeContent.substring(0, 2000)}${botCodeContent.length > 2000 ? '\n... (truncated)' : ''}\n\`\`\`\n\n`; // Limit size and use code block
+
+        // --- Send Requirements ---
+        let requirementsContent = "📝 No requirements.txt found or it's empty.";
+        if (fs.existsSync(botInfo.requirementsPath)) {
+             const stats = fs.statSync(botInfo.requirementsPath);
+             if (stats.size > 0) {
+                 try {
+                     requirementsContent = fs.readFileSync(botInfo.requirementsPath, 'utf8');
+                 } catch (readError) {
+                     console.error(`[Source] Error reading requirements file ${botInfo.requirementsPath}:`, readError);
+                     requirementsContent = `❌ Error reading requirements file: ${readError.message}`;
+                 }
+             }
+        }
+        sourceMessage += `🔹 Requirements:\n\`\`\`\n${requirementsContent.substring(0, 1000)}${requirementsContent.length > 1000 ? '\n... (truncated)' : ''}\n\`\`\``; // Limit size and use code block
+
+        await ctx.reply(sourceMessage, { parse_mode: 'Markdown' }); // Use Markdown for code blocks
+    } catch (error) {
+        console.error(`[Source] Unexpected error for bot ${targetBotName}:`, error);
+        await ctx.reply(`❌ An unexpected error occurred while retrieving the source for "${targetBotName}".`);
+    }
+});
+// --- End NEW COMMAND: /source <bot> ---
+
 bot.command('create_bot', (ctx) => {
     const userId = ctx.from.id;
     const botName = ctx.message.text.split(' ')[1];
@@ -175,9 +227,7 @@ bot.command('create_bot', (ctx) => {
         ])
     );
 });
-// --- End NEW FLOW: /create_bot <name> ---
 
-// --- NEW FLOW: /req <bot> ---
 bot.command('req', (ctx) => {
     const userId = ctx.from.id;
     const targetBotName = ctx.message.text.split(' ')[1];
@@ -188,7 +238,7 @@ bot.command('req', (ctx) => {
 
     const botInfo = managedBots.get(targetBotName);
     if (!botInfo) {
-        return ctx.reply(`❌ Bot "${targetBotName}" not found. Use /logs or /list (if implemented) to see available bots.`);
+        return ctx.reply(`❌ Bot "${targetBotName}" not found.`);
     }
 
     setUserState(userId, 'AWAITING_REQ_SOURCE', { botName: targetBotName });
@@ -199,9 +249,7 @@ bot.command('req', (ctx) => {
         ])
     );
 });
-// --- End NEW FLOW: /req <bot> ---
 
-// --- NEW COMMAND: /delete_bot <name> ---
 bot.command('delete_bot', async (ctx) => {
     const targetBotName = ctx.message.text.split(' ')[1];
 
@@ -230,7 +278,9 @@ bot.command('delete_bot', async (ctx) => {
             }
         } catch (fileError) {
             console.error(`[DeleteBot] Error deleting files for ${targetBotName}:`, fileError);
-            // Don't prevent deletion from map if file deletion fails
+            // Don't prevent deletion from map if file deletion fails, inform user
+            await ctx.reply(`⚠️ Bot "${targetBotName}" entry removed, but there was an error deleting its files: ${fileError.message}`);
+            // Continue to remove from map
         }
 
         // Remove from managed bots map
@@ -239,10 +289,9 @@ bot.command('delete_bot', async (ctx) => {
         ctx.reply(`✅ Bot "${targetBotName}" has been deleted.`);
     } catch (error) {
         console.error(`[DeleteBot] Error deleting bot ${targetBotName}:`, error);
-        ctx.reply(`❌ An error occurred while deleting bot "${targetBotName}".`);
+        ctx.reply(`❌ An error occurred while deleting bot "${targetBotName}": ${error.message}`);
     }
 });
-// --- End NEW COMMAND: /delete_bot <name> ---
 
 // Handle text input based on user state
 bot.on('text', async (ctx) => {
@@ -286,7 +335,7 @@ bot.on('text', async (ctx) => {
         } catch (error) {
             console.error('[Text Code] Error saving code:', error);
             clearUserState(userId);
-            ctx.reply('❌ An error occurred while saving the code. Please try creating the bot again.');
+            ctx.reply(`❌ An error occurred while saving the code for "${botName}": ${error.message}`);
         }
         return;
     }
@@ -311,7 +360,7 @@ bot.on('text', async (ctx) => {
         } catch (error) {
             console.error('[Req Text] Error saving requirements:', error);
             clearUserState(userId);
-            ctx.reply('❌ An error occurred while saving the requirements text.');
+            ctx.reply(`❌ An error occurred while saving the requirements text for "${targetBotName}": ${error.message}`);
         }
         return;
     }
@@ -404,7 +453,9 @@ bot.on('document', async (ctx) => {
                 console.log(`[File Upload] File downloaded successfully, size: ${buffer.length} bytes.`);
             } catch (fetchError) {
                 console.error(`[File Upload] Error fetching file from Telegram:`, fetchError);
-                throw new Error(`Could not download file from Telegram: ${fetchError.message}`);
+                // This error relates to fetching from Telegram, inform user
+                ctx.reply(`❌ Could not download the file from Telegram: ${fetchError.message}`);
+                return; // Stop processing
             }
 
             fs.writeFileSync(filePath, buffer);
@@ -430,7 +481,7 @@ bot.on('document', async (ctx) => {
         } catch (error) {
             console.error('[File Upload] Error:', error);
             clearUserState(userId); // Clear state on error
-            ctx.reply('❌ Error processing the uploaded file. Please try creating the bot again.');
+            ctx.reply(`❌ Error processing the uploaded file for "${state.data.botName}": ${error.message}`);
         }
         return; // Handled bot file upload
     }
@@ -467,7 +518,9 @@ bot.on('document', async (ctx) => {
                  console.log(`[Req Upload] File downloaded successfully, size: ${buffer.length} bytes.`);
              } catch (fetchError) {
                  console.error(`[Req Upload] Error fetching file from Telegram:`, fetchError);
-                 throw new Error(`Could not download file from Telegram: ${fetchError.message}`);
+                 // This error relates to fetching from Telegram, inform user
+                 ctx.reply(`❌ Could not download the requirements.txt file from Telegram: ${fetchError.message}`);
+                 return; // Stop processing
              }
 
              fs.writeFileSync(botInfo.requirementsPath, buffer);
@@ -475,7 +528,7 @@ bot.on('document', async (ctx) => {
              ctx.reply(`✅ requirements.txt successfully uploaded and linked to bot "${targetBotName}"!\n\nYou can now start the bot with /start_bot ${targetBotName}.`);
          } catch (error) {
              console.error('[Req Upload] Error:', error);
-             ctx.reply('❌ Error processing the uploaded requirements.txt file.');
+             ctx.reply(`❌ Error processing the uploaded requirements.txt file for "${targetBotName}": ${error.message}`);
          }
          return; // Handled requirements upload
     }
@@ -511,11 +564,12 @@ bot.command('start_bot', async (ctx) => {
             await ctx.telegram.editMessageText(ctx.chat.id, installingMsg.message_id, undefined, `✅ Requirements installed (or none found) for "${botName}".`);
         } catch (installError) {
             console.error(`[StartBot] Error installing requirements for ${botName}:`, installError);
+            // Detailed error sent to user
             const errorMessage = installError.message.length > 300 ?
                 installError.message.substring(0, 300) + '... (truncated)' :
                 installError.message;
             await ctx.telegram.editMessageText(ctx.chat.id, installingMsg.message_id, undefined, `❌ Failed to install requirements for "${botName}". Bot not started.\nError: ${errorMessage}`);
-            return;
+            return; // Stop if install failed
         }
 
         console.log(`[StartBot: ${botName}] Starting Python bot: ${botInfo.filePath}`);
@@ -549,7 +603,7 @@ bot.command('start_bot', async (ctx) => {
         ctx.reply(`🚀 Bot "${botName}" started successfully!`);
     } catch (error) {
         console.error('[StartBot] Unexpected error:', error);
-        ctx.reply(`❌ Error starting bot "${botName}".`);
+        ctx.reply(`❌ Error starting bot "${botName}": ${error.message}`);
     }
 });
 
@@ -579,7 +633,7 @@ bot.command('stop_bot', (ctx) => {
         ctx.reply(`⏹️ Bot "${botName}" stopped successfully!`);
     } catch (error) {
         console.error('[StopBot] Error:', error);
-        ctx.reply(`❌ Error stopping bot "${botName}".`);
+        ctx.reply(`❌ Error stopping bot "${botName}": ${error.message}`);
     }
 });
 
@@ -611,27 +665,40 @@ bot.command('logs', (ctx) => {
     ctx.reply(message);
 });
 
-// Error handling for the bot itself
+// Error handling for the bot itself (catches errors in middleware/handlers)
 bot.catch((err, ctx) => {
-    console.error('Bot error:', err);
+    console.error('Bot error:', err); // Always log to console for debugging
     // Clear user state on bot error to prevent getting stuck
     clearUserState(ctx.from.id);
+    // Send a generic error message to the user
     ctx.reply('❌ An unexpected error occurred in the master bot. Please try your command again.');
 });
 
 // Start the bot
-bot.launch();
+bot.launch()
+    .then(() => {
+        console.log('🚀 Telegram Master Bot started!');
+    })
+    .catch((err) => {
+        // This is a critical startup error (e.g., network issue, invalid token for polling)
+        // Cannot reliably send message to Telegram if launch fails
+        console.error('Failed to launch bot:', err);
+        process.exit(1);
+    });
 
-console.log('🚀 Telegram Master Bot started!');
 
 // Graceful shutdown
 process.once('SIGINT', () => {
     console.log('Received SIGINT. Shutting down gracefully...');
-    bot.stop('SIGINT');
+    bot.stop('SIGINT')
+       .then(() => console.log('Bot stopped.'))
+       .catch(console.error);
     process.exit(0);
 });
 process.once('SIGTERM', () => {
     console.log('Received SIGTERM. Shutting down gracefully...');
-    bot.stop('SIGTERM');
+    bot.stop('SIGTERM')
+       .then(() => console.log('Bot stopped.'))
+       .catch(console.error);
     process.exit(0);
 });
