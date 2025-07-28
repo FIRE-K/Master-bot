@@ -1,4 +1,3 @@
-// index.js
 const { Telegraf, Markup } = require('telegraf'); // Import Markup for buttons
 const { exec, spawn } = require('child_process');
 const fs = require('fs');
@@ -106,6 +105,24 @@ function clearUserState(userId) {
 }
 // --- End State Management Helpers ---
 
+// --- Helper to Stop a Bot (for deletion) ---
+async function stopBot(botName) {
+    const botInfo = managedBots.get(botName);
+    if (botInfo && botInfo.status === 'running' && botInfo.process) {
+        try {
+            botInfo.process.kill('SIGTERM');
+            botInfo.process = null;
+        } catch (error) {
+            console.error(`[StopBotHelper] Error killing process for ${botName}:`, error);
+            // Continue with deletion even if kill fails
+        }
+    }
+    if (botInfo) {
+        botInfo.status = 'stopped';
+    }
+}
+// --- End Helper to Stop a Bot ---
+
 // Command: Start
 bot.start((ctx) => {
     const welcomeMessage = `🤖 Welcome to the Telegram Master Bot!
@@ -113,15 +130,15 @@ bot.start((ctx) => {
 I can manage and run Python bots for you.
 
 Commands:
-/create_bot - Start creating a new bot (upload file or paste code)
-/req - Add requirements.txt for an existing bot
-/list - List all managed bots
-/startbot <bot_name> - Start a specific bot
-/stopbot <bot_name> - Stop a specific bot
-/logs <bot_name> - View logs for a specific bot
+/create_bot <name> - Start creating a new bot with a specific name
+/delete_bot <name> - Delete a bot (stops it if running)
+/start_bot <name> - Start a specific bot
+/stop_bot <name> - Stop a specific bot
+/req <name> - Add requirements.txt for an existing bot
+/logs <name> - View logs for a specific bot
 /help - Show this help message
 
-Get started by using /create_bot!`;
+Get started by using /create_bot <your_bot_name>!`;
     ctx.reply(welcomeMessage);
 });
 
@@ -130,43 +147,112 @@ bot.help((ctx) => {
     const helpMessage = `🤖 Telegram Master Bot - Help
 
 Commands:
-/create_bot - Initiates the process to add a new Python bot.
-/req - Initiates the process to add requirements for an existing bot.
-/list - Lists all bots currently managed.
-/startbot <bot_name> - Starts a specific bot (installs requirements if provided).
-/stopbot <bot_name> - Stops a running bot.
-/logs <bot_name> - Displays the last logs for a bot.
+/create_bot <name> - Initiates the process to add a new Python bot with the given name.
+/delete_bot <name> - Deletes a bot. It will be stopped if currently running.
+/start_bot <name> - Starts a specific bot (installs requirements if provided).
+/stop_bot <name> - Stops a running bot.
+/req <name> - Initiates the process to add requirements for an existing bot.
+/logs <name> - Displays the last logs for a bot.
 /help - Shows this help message.
 
 Steps to add a bot:
-1. Use /create_bot.
-2. Enter a unique name for your new bot.
-3. Choose whether to upload a .py file or paste code directly.
-4. (Optional) Later, use /req <bot_name> to provide requirements (upload file or paste text).
-5. Start your bot with /startbot <bot_name>.`;
+1. Use /create_bot <unique_bot_name>.
+2. Choose whether to upload a .py file or paste code directly.
+3. (Optional) Later, use /req <bot_name> to provide requirements (upload file or paste text).
+4. Start your bot with /start_bot <bot_name>.`;
     ctx.reply(helpMessage);
 });
 
-// --- NEW FLOW: /create_bot ---
+// --- NEW FLOW: /create_bot <name> ---
 bot.command('create_bot', (ctx) => {
     const userId = ctx.from.id;
-    setUserState(userId, 'AWAITING_BOT_NAME');
-    ctx.reply('🔤 Please enter a unique name for your new bot:');
-});
+    const botName = ctx.message.text.split(' ')[1];
 
-// --- NEW FLOW: /req ---
-bot.command('req', (ctx) => {
-    const userId = ctx.from.id;
-    // Check if there are any bots first
-    if (managedBots.size === 0) {
-        return ctx.reply('📭 No bots created yet. Use /create_bot to add one first.');
+    if (!botName) {
+        return ctx.reply('⚠️ Usage: /create_bot <bot_name>');
     }
 
-    // Prompt user for the bot name
-    setUserState(userId, 'AWAITING_BOT_NAME_FOR_REQ');
-    ctx.reply('🔤 Please enter the name of the bot you want to add requirements for:');
+    const sanitizedBotName = botName.trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+    if (managedBots.has(sanitizedBotName)) {
+         return ctx.reply(`❌ A bot named "${sanitizedBotName}" already exists. Please choose a different name.`);
+    }
+
+    setUserState(userId, 'AWAITING_BOT_SOURCE', { botName: sanitizedBotName });
+    ctx.reply(`📝 How would you like to provide the code for "${sanitizedBotName}"?`,
+        Markup.inlineKeyboard([
+            Markup.button.callback('📤 Upload .py File', 'upload_file'),
+            Markup.button.callback('✏️ Paste Code Text', 'paste_code')
+        ])
+    );
 });
-// --- End NEW FLOW: /req ---
+// --- End NEW FLOW: /create_bot <name> ---
+
+// --- NEW FLOW: /req <bot> ---
+bot.command('req', (ctx) => {
+    const userId = ctx.from.id;
+    const targetBotName = ctx.message.text.split(' ')[1];
+
+    if (!targetBotName) {
+        return ctx.reply('⚠️ Usage: /req <bot_name>');
+    }
+
+    const botInfo = managedBots.get(targetBotName);
+    if (!botInfo) {
+        return ctx.reply(`❌ Bot "${targetBotName}" not found. Use /logs or /list (if implemented) to see available bots.`);
+    }
+
+    setUserState(userId, 'AWAITING_REQ_SOURCE', { botName: targetBotName });
+    ctx.reply(`📝 How would you like to provide the requirements for "${targetBotName}"?`,
+        Markup.inlineKeyboard([
+            Markup.button.callback('📤 Upload requirements.txt File', 'upload_req_file'),
+            Markup.button.callback('✏️ Paste Requirements Text', 'paste_req_text')
+        ])
+    );
+});
+// --- End NEW FLOW: /req <bot> ---
+
+// --- NEW COMMAND: /delete_bot <name> ---
+bot.command('delete_bot', async (ctx) => {
+    const targetBotName = ctx.message.text.split(' ')[1];
+
+    if (!targetBotName) {
+        return ctx.reply('⚠️ Usage: /delete_bot <bot_name>');
+    }
+
+    const botInfo = managedBots.get(targetBotName);
+    if (!botInfo) {
+        return ctx.reply(`❌ Bot "${targetBotName}" not found.`);
+    }
+
+    try {
+        // Stop the bot if it's running
+        await stopBot(targetBotName);
+
+        // Delete files
+        try {
+            if (fs.existsSync(botInfo.filePath)) {
+                fs.unlinkSync(botInfo.filePath);
+                console.log(`[DeleteBot] Deleted bot file: ${botInfo.filePath}`);
+            }
+            if (fs.existsSync(botInfo.requirementsPath)) {
+                fs.unlinkSync(botInfo.requirementsPath);
+                console.log(`[DeleteBot] Deleted requirements file: ${botInfo.requirementsPath}`);
+            }
+        } catch (fileError) {
+            console.error(`[DeleteBot] Error deleting files for ${targetBotName}:`, fileError);
+            // Don't prevent deletion from map if file deletion fails
+        }
+
+        // Remove from managed bots map
+        managedBots.delete(targetBotName);
+        console.log(`[DeleteBot] Bot "${targetBotName}" deleted.`);
+        ctx.reply(`✅ Bot "${targetBotName}" has been deleted.`);
+    } catch (error) {
+        console.error(`[DeleteBot] Error deleting bot ${targetBotName}:`, error);
+        ctx.reply(`❌ An error occurred while deleting bot "${targetBotName}".`);
+    }
+});
+// --- End NEW COMMAND: /delete_bot <name> ---
 
 // Handle text input based on user state
 bot.on('text', async (ctx) => {
@@ -176,29 +262,9 @@ bot.on('text', async (ctx) => {
 
     if (!state) {
         // If user sends text outside a flow, just acknowledge or ignore
-        ctx.reply("Send /create_bot to start adding a new bot or /req to add requirements.");
-        return;
+        // ctx.reply("Send a command like /create_bot <name> or /req <name>.");
+        return; // Silent ignore is often better UX
     }
-
-    // --- Handle receiving bot name for /create_bot ---
-    if (state.step === 'AWAITING_BOT_NAME') {
-        const botName = messageText.replace(/[^a-zA-Z0-9_-]/g, '_'); // Sanitize name
-
-        if (managedBots.has(botName)) {
-             ctx.reply(`❌ A bot named "${botName}" already exists. Please choose a different name:`);
-             return; // Stay in the same state
-        }
-
-        setUserState(userId, 'AWAITING_BOT_SOURCE', { botName });
-        await ctx.reply(`📝 How would you like to provide the code for "${botName}"?`,
-            Markup.inlineKeyboard([
-                Markup.button.callback('📤 Upload .py File', 'upload_file'),
-                Markup.button.callback('✏️ Paste Code Text', 'paste_code')
-            ])
-        );
-        return;
-    }
-    // --- End Handle receiving bot name for /create_bot ---
 
     // --- Handle receiving code text for /create_bot ---
     if (state.step === 'AWAITING_CODE_TEXT') {
@@ -226,7 +292,7 @@ bot.on('text', async (ctx) => {
             }
 
             clearUserState(userId);
-            ctx.reply(`✅ Python code received and bot "${botName}" created successfully!\n\nYou can now:\n- Use /startbot ${botName} to run it.\n- Use /req ${botName} to provide requirements.`);
+            ctx.reply(`✅ Python code received and bot "${botName}" created successfully!\n\nYou can now:\n- Use /start_bot ${botName} to run it.\n- Use /req ${botName} to provide requirements.`);
         } catch (error) {
             console.error('[Text Code] Error saving code:', error);
             clearUserState(userId);
@@ -235,29 +301,6 @@ bot.on('text', async (ctx) => {
         return;
     }
     // --- End Handle receiving code text for /create_bot ---
-
-    // --- Handle receiving bot name for /req ---
-    if (state.step === 'AWAITING_BOT_NAME_FOR_REQ') {
-        const targetBotName = messageText;
-
-        // Check if the bot exists
-        const botInfo = managedBots.get(targetBotName);
-        if (!botInfo) {
-             clearUserState(userId); // Clear state on error
-             return ctx.reply(`❌ Bot "${targetBotName}" not found. Use /list to see available bots.`);
-        }
-
-        // Bot found, ask for input method
-        setUserState(userId, 'AWAITING_REQ_SOURCE', { botName: targetBotName });
-        await ctx.reply(`📝 How would you like to provide the requirements for "${targetBotName}"?`,
-            Markup.inlineKeyboard([
-                Markup.button.callback('📤 Upload requirements.txt File', 'upload_req_file'),
-                Markup.button.callback('✏️ Paste Requirements Text', 'paste_req_text')
-            ])
-        );
-        return;
-    }
-    // --- End Handle receiving bot name for /req ---
 
     // --- Handle receiving requirements text for /req ---
     if (state.step === 'AWAITING_REQ_TEXT') {
@@ -274,7 +317,7 @@ bot.on('text', async (ctx) => {
             fs.writeFileSync(botInfo.requirementsPath, messageText);
             console.log(`[Req Text] Requirements text saved to ${botInfo.requirementsPath}`);
             clearUserState(userId);
-            ctx.reply(`✅ Requirements text saved for bot "${targetBotName}"!\n\nYou can now start the bot with /startbot ${targetBotName}.`);
+            ctx.reply(`✅ Requirements text saved for bot "${targetBotName}"!\n\nYou can now start the bot with /start_bot ${targetBotName}.`);
         } catch (error) {
             console.error('[Req Text] Error saving requirements:', error);
             clearUserState(userId);
@@ -285,7 +328,7 @@ bot.on('text', async (ctx) => {
     // --- End Handle receiving requirements text for /req ---
 
     // Handle other text messages (e.g., if user types something unexpected during a flow)
-    ctx.reply("Please follow the prompts or use /help for commands.");
+    // ctx.reply("Please follow the prompts or use /help for commands.");
 });
 
 // Handle callback queries (button presses)
@@ -353,10 +396,7 @@ bot.on('document', async (ctx) => {
             }
 
             const botName = state.data.botName;
-            const expectedFileName = `${botName}.py`;
-            // Optional: Enforce filename or just use the uploaded one. Let's use the uploaded one.
-            // if (fileName !== expectedFileName) { ... warn or adjust ... }
-
+            // Use the uploaded filename, but associate it with the provided bot name
             const filePath = path.join(uploadsDir, fileName);
             const requirementsPath = path.join(uploadsDir, `${botName}_requirements.txt`);
 
@@ -381,8 +421,8 @@ bot.on('document', async (ctx) => {
             console.log(`[File Upload] File written to disk: ${filePath}`);
 
             managedBots.set(botName, {
-                name: botName,
-                fileName: fileName,
+                name: botName, // Keep the name provided by the user
+                fileName: fileName, // Store the actual uploaded filename
                 filePath: filePath,
                 requirementsPath: requirementsPath,
                 process: null,
@@ -395,7 +435,7 @@ bot.on('document', async (ctx) => {
             }
 
             clearUserState(userId);
-            ctx.reply(`✅ Bot file "${fileName}" uploaded and bot "${botName}" created successfully!\n\nYou can now:\n- Use /startbot ${botName} to run it.\n- Use /req ${botName} to provide requirements.`);
+            ctx.reply(`✅ Bot file "${fileName}" uploaded and bot "${botName}" created successfully!\n\nYou can now:\n- Use /start_bot ${botName} to run it.\n- Use /req ${botName} to provide requirements.`);
 
         } catch (error) {
             console.error('[File Upload] Error:', error);
@@ -442,7 +482,7 @@ bot.on('document', async (ctx) => {
 
              fs.writeFileSync(botInfo.requirementsPath, buffer);
              console.log(`[Req Upload] File written to disk: ${botInfo.requirementsPath}`);
-             ctx.reply(`✅ requirements.txt successfully uploaded and linked to bot "${targetBotName}"!\n\nYou can now start the bot with /startbot ${targetBotName}.`);
+             ctx.reply(`✅ requirements.txt successfully uploaded and linked to bot "${targetBotName}"!\n\nYou can now start the bot with /start_bot ${targetBotName}.`);
          } catch (error) {
              console.error('[Req Upload] Error:', error);
              ctx.reply('❌ Error processing the uploaded requirements.txt file.');
@@ -452,36 +492,22 @@ bot.on('document', async (ctx) => {
     // --- End Handle requirements.txt upload for /req ---
 
     // Ignore document if not expecting an upload in a known state
-    ctx.reply("Please use /create_bot or /req first if you want to add a file.");
+    // ctx.reply("Please use /create_bot <name> or /req <name> first if you want to add a file.");
 });
 
-// --- REMAINING COMMANDS (unchanged logic, updated messages) ---
+// --- REMAINING COMMANDS ---
 
-// Command: List bots
-bot.command('list', (ctx) => {
-    if (managedBots.size === 0) {
-        return ctx.reply('📭 No bots created yet. Use /create_bot to add one.');
-    }
-
-    let message = '🤖 Managed Bots:\n\n';
-    managedBots.forEach((botInfo, botName) => {
-        message += `🔹 ${botName} - Status: ${botInfo.status.toUpperCase()}\n`;
-    });
-
-    ctx.reply(message);
-});
-
-// Command: Start bot (mostly unchanged, minor logging update)
-bot.command('startbot', async (ctx) => {
+// Command: Start bot
+bot.command('start_bot', async (ctx) => {
     const botName = ctx.message.text.split(' ')[1];
 
     if (!botName) {
-        return ctx.reply('⚠️ Usage: /startbot <bot_name>\nUse /list to see available bots.');
+        return ctx.reply('⚠️ Usage: /start_bot <bot_name>');
     }
 
     const botInfo = managedBots.get(botName);
     if (!botInfo) {
-        return ctx.reply(`❌ Bot "${botName}" not found. Use /list to see available bots.`);
+        return ctx.reply(`❌ Bot "${botName}" not found.`);
     }
 
     if (botInfo.status === 'running') {
@@ -509,7 +535,7 @@ bot.command('startbot', async (ctx) => {
 
         botInfo.process = pythonProcess;
         botInfo.status = 'running';
-        botInfo.logs = [];
+        botInfo.logs = []; // Clear previous logs on restart
 
         pythonProcess.stdout.on('data', (data) => {
             const log = data.toString();
@@ -538,11 +564,11 @@ bot.command('startbot', async (ctx) => {
 });
 
 // Command: Stop bot
-bot.command('stopbot', (ctx) => {
+bot.command('stop_bot', (ctx) => {
     const botName = ctx.message.text.split(' ')[1];
 
     if (!botName) {
-        return ctx.reply('⚠️ Usage: /stopbot <bot_name>\nUse /list to see available bots.');
+        return ctx.reply('⚠️ Usage: /stop_bot <bot_name>');
     }
 
     const botInfo = managedBots.get(botName);
@@ -572,7 +598,7 @@ bot.command('logs', (ctx) => {
     const botName = ctx.message.text.split(' ')[1];
 
     if (!botName) {
-        return ctx.reply('⚠️ Usage: /logs <bot_name>\nUse /list to see available bots.');
+        return ctx.reply('⚠️ Usage: /logs <bot_name>');
     }
 
     const botInfo = managedBots.get(botName);
