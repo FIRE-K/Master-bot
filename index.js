@@ -140,7 +140,7 @@ bot.help((ctx) => {
 Commands:
 /create_bot <name> - Initiates the process to add a new Python bot with the given name.
 /delete_bot <name> - Deletes a bot. It will be stopped if currently running.
-/start_bot <name> - Starts a specific bot (installs requirements if provided).
+/run_bot <name> - Starts a specific bot (installs requirements if provided).
 /stop_bot <name> - Stops a running bot.
 /req <name> - Initiates the process to add requirements for an existing bot.
 /source <name> - Sends the source code and requirements for a bot.
@@ -151,7 +151,7 @@ Steps to add a bot:
 1. Use /create_bot <unique_bot_name>.
 2. Choose whether to upload a .py file or paste code directly.
 3. (Optional) Later, use /req <bot_name> to provide requirements (upload file or paste text).
-4. Start your bot with /start_bot <bot_name>.`;
+4. Run your bot with /run_bot <bot_name>.`;
     ctx.reply(helpMessage);
 });
 
@@ -331,7 +331,7 @@ bot.on('text', async (ctx) => {
             }
 
             clearUserState(userId);
-            ctx.reply(`✅ Python code received and bot "${botName}" created successfully!\n\nYou can now:\n- Use /start_bot ${botName} to run it.\n- Use /req ${botName} to provide requirements.`);
+            ctx.reply(`✅ Python code received and bot "${botName}" created successfully!\n\nYou can now:\n- Use /run_bot ${botName} to run it.\n- Use /req ${botName} to provide requirements.`);
         } catch (error) {
             console.error('[Text Code] Error saving code:', error);
             clearUserState(userId);
@@ -356,7 +356,7 @@ bot.on('text', async (ctx) => {
             fs.writeFileSync(botInfo.requirementsPath, messageText);
             console.log(`[Req Text] Requirements text saved to ${botInfo.requirementsPath}`);
             clearUserState(userId);
-            ctx.reply(`✅ Requirements text saved for bot "${targetBotName}"!\n\nYou can now start the bot with /start_bot ${targetBotName}.`);
+            ctx.reply(`✅ Requirements text saved for bot "${targetBotName}"!\n\nYou can now run the bot with /run_bot ${targetBotName}.`);
         } catch (error) {
             console.error('[Req Text] Error saving requirements:', error);
             clearUserState(userId);
@@ -476,7 +476,7 @@ bot.on('document', async (ctx) => {
             }
 
             clearUserState(userId);
-            ctx.reply(`✅ Bot file "${fileName}" uploaded and bot "${botName}" created successfully!\n\nYou can now:\n- Use /start_bot ${botName} to run it.\n- Use /req ${botName} to provide requirements.`);
+            ctx.reply(`✅ Bot file "${fileName}" uploaded and bot "${botName}" created successfully!\n\nYou can now:\n- Use /run_bot ${botName} to run it.\n- Use /req ${botName} to provide requirements.`);
 
         } catch (error) {
             console.error('[File Upload] Error:', error);
@@ -525,7 +525,7 @@ bot.on('document', async (ctx) => {
 
              fs.writeFileSync(botInfo.requirementsPath, buffer);
              console.log(`[Req Upload] File written to disk: ${botInfo.requirementsPath}`);
-             ctx.reply(`✅ requirements.txt successfully uploaded and linked to bot "${targetBotName}"!\n\nYou can now start the bot with /start_bot ${targetBotName}.`);
+             ctx.reply(`✅ requirements.txt successfully uploaded and linked to bot "${targetBotName}"!\n\nYou can now run the bot with /run_bot ${targetBotName}.`);
          } catch (error) {
              console.error('[Req Upload] Error:', error);
              ctx.reply(`❌ Error processing the uploaded requirements.txt file for "${targetBotName}": ${error.message}`);
@@ -540,12 +540,12 @@ bot.on('document', async (ctx) => {
 
 // --- REMAINING COMMANDS ---
 
-// Command: Start bot
-bot.command('start_bot', async (ctx) => {
+// Command: Run bot
+bot.command('run_bot', async (ctx) => {
     const botName = ctx.message.text.split(' ')[1];
 
     if (!botName) {
-        return ctx.reply('⚠️ Usage: /start_bot <bot_name>');
+        return ctx.reply('⚠️ Usage: /run_bot <bot_name>');
     }
 
     const botInfo = managedBots.get(botName);
@@ -563,16 +563,16 @@ bot.command('start_bot', async (ctx) => {
             await installRequirements(botInfo.requirementsPath, botName);
             await ctx.telegram.editMessageText(ctx.chat.id, installingMsg.message_id, undefined, `✅ Requirements installed (or none found) for "${botName}".`);
         } catch (installError) {
-            console.error(`[StartBot] Error installing requirements for ${botName}:`, installError);
+            console.error(`[RunBot] Error installing requirements for ${botName}:`, installError);
             // Detailed error sent to user
             const errorMessage = installError.message.length > 300 ?
                 installError.message.substring(0, 300) + '... (truncated)' :
                 installError.message;
-            await ctx.telegram.editMessageText(ctx.chat.id, installingMsg.message_id, undefined, `❌ Failed to install requirements for "${botName}". Bot not started.\nError: ${errorMessage}`);
+            await ctx.telegram.editMessageText(ctx.chat.id, installingMsg.message_id, undefined, `❌ Failed to install requirements for "${botName}". Bot not runned.\nError: ${errorMessage}`);
             return; // Stop if install failed
         }
 
-        console.log(`[StartBot: ${botName}] Starting Python bot: ${botInfo.filePath}`);
+        console.log(`[RunBot: ${botName}] Running Python bot: ${botInfo.filePath}`);
         const pythonProcess = spawn('python3', [botInfo.filePath], {
             cwd: uploadsDir
         });
@@ -602,8 +602,8 @@ bot.command('start_bot', async (ctx) => {
 
         ctx.reply(`🚀 Bot "${botName}" started successfully!`);
     } catch (error) {
-        console.error('[StartBot] Unexpected error:', error);
-        ctx.reply(`❌ Error starting bot "${botName}": ${error.message}`);
+        console.error('[RunBot] Unexpected error:', error);
+        ctx.reply(`❌ Error running bot "${botName}": ${error.message}`);
     }
 });
 
