@@ -127,8 +127,8 @@ async function stopBot(botName) {
 bot.start((ctx) => {
     const welcomeMessage = `🤖 Welcome to the Telegram Master Bot!
 
-I can manage and run Python bots for you. View \`/help\` for more
-Get started by using \`/create_bot <your_bot_name>!\``;
+I can manage and run Python bots for you. View '/help' for more. \\
+Get started by using '/create_bot <your_bot_name>!'`;
     ctx.reply(welcomeMessage);
 });
 
