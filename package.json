@@ -1,0 +1,17 @@
+{
+  "name": "telegram-master-bot",
+  "version": "1.0.0",
+  "description": "A Telegram bot that can manage and run other Python Telegram bots",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "dependencies": {
+    "telegraf": "^4.12.2",
+    "express": "^4.18.2"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  }
+}
