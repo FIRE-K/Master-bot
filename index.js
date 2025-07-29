@@ -15,7 +15,7 @@ if (!fs.existsSync(uploadsDir)) {
 const managedBots = new Map();
 
 // Track state for multi-step interactions
-const userStates = {}; // userId -> { step: '...', data: {...} }
+const userStates = {}; // userId -> { step: '...',  {...} }
 
 // Initialize Express app for health checks
 const app = express();
@@ -185,7 +185,7 @@ function clearUserState(userId) {
 }
 // --- End State Management Helpers ---
 
-// --- Helper to Stop a Bot (for deletion) ---
+// --- Helper to Stop a Bot (for deletion/editing) ---
 async function stopBot(botName) {
     const botInfo = managedBots.get(botName);
     if (botInfo && botInfo.status === 'running' && botInfo.process) {
@@ -194,7 +194,7 @@ async function stopBot(botName) {
             botInfo.process = null;
         } catch (error) {
             console.error(`[StopBotHelper] Error killing process for ${botName}:`, error);
-            // Continue with potential deletion even if kill fails
+            // Continue with potential deletion/editing even if kill fails
         }
     }
     if (botInfo) {
@@ -216,11 +216,12 @@ bot.help((ctx) => {
     const helpMessage = `🤖 MASTER Bot - Help
 Commands:
 /create_bot <name> - Initiates the process to add a new Python bot with the given name.
+/edit_bot <name> - Initiates the process to edit the source code of an existing bot.
 /delete_bot <name> - Deletes a bot. It will be stopped if currently running.
 /run_bot <name> - Starts a specific bot (installs requirements if provided).
 /stop_bot <name> - Stops a running bot.
 /req <name> - Initiates the process to add requirements for an existing bot.
-/source <name> - Sends the source code and requirements for a bot.
+/source <name> - Sends the source code and requirements for a bot as files.
 /logs <name> - Displays the last logs for a bot.
 /help - Shows this help message.
 Steps to add a bot:
@@ -339,9 +340,11 @@ bot.command('logs', (ctx) => {
     const recentLogs = botInfo.logs.slice(-25);
     let message = `📋 Logs for ${botName}:
 `;
-    message += recentLogs.join('\n');
+    message += recentLogs.join('
+');
     if (message.length > 4000) {
-        message = message.substring(0, 4000) + '\n... (truncated)';
+        message = message.substring(0, 4000) + '
+... (truncated)';
     }
     ctx.reply(message);
 });
@@ -354,7 +357,6 @@ bot.catch((err, ctx) => {
     // Send a generic error message to the user
     ctx.reply('❌ An unexpected error occurred in the master bot. Please try your command again.');
 });
-
 
 // --- NEW COMMAND: /source <bot> (Send as Files) ---
 bot.command('source', async (ctx) => {
@@ -432,6 +434,31 @@ bot.command('source', async (ctx) => {
     }
 });
 // --- End NEW COMMAND: /source <bot> (Send as Files) ---
+
+// --- NEW COMMAND: /edit_bot <bot> ---
+bot.command('edit_bot', (ctx) => {
+    const userId = ctx.from.id;
+    const botName = ctx.message.text.split(' ')[1];
+    if (!botName) {
+        return ctx.reply('⚠️ Usage: /edit_bot <bot_name>');
+    }
+    const botInfo = managedBots.get(botName);
+    if (!botInfo) {
+        return ctx.reply(`❌ Bot "${botName}" not found.`);
+    }
+
+    // Optional: Ask user if they want to see current source first?
+    // For now, directly ask how to provide new source.
+    setUserState(userId, 'AWAITING_EDIT_BOT_SOURCE', { botName: botName });
+    ctx.reply(`📝 How would you like to provide the NEW code for "${botName}"?`,
+        Markup.inlineKeyboard([
+            Markup.button.callback('📤 Upload New .py File', 'upload_file_edit'),
+            Markup.button.callback('✏️ Paste New Code Text', 'paste_code_edit')
+            // Optional: Markup.button.callback('👀 View Current Code First', 'view_current_code_edit')
+        ])
+    );
+});
+// --- End NEW COMMAND: /edit_bot <bot> ---
 
 bot.command('create_bot', (ctx) => {
     const userId = ctx.from.id;
@@ -588,7 +615,49 @@ You can now run the bot with /run_bot ${targetBotName}.`);
         }
         return;
     }
-    // --- End Handle receiving requirements text for /req ---
+    // --- Handle receiving new code text for /edit_bot ---
+    if (state.step === 'AWAITING_CODE_TEXT_EDIT') {
+        const targetBotName = state.data.botName;
+        clearUserState(userId); // Clear state immediately after getting data
+
+        const botInfo = managedBots.get(targetBotName);
+        if (!botInfo) {
+             return ctx.reply(`❌ Error: Target bot '${targetBotName}' not found for editing.`);
+        }
+
+        const newCodeContent = messageText;
+        const targetFilePath = botInfo.filePath; // Path to overwrite
+
+        try {
+            fs.writeFileSync(targetFilePath, newCodeContent);
+            console.log(`[Edit Text Code] New code saved to ${targetFilePath}`);
+
+            // Stop the bot if it's running, as the code has changed
+            if (botInfo.status === 'running' && botInfo.process) {
+                 try {
+                     botInfo.process.kill('SIGTERM');
+                     botInfo.process = null;
+                     botInfo.status = 'stopped';
+                     console.log(`[Edit Text Code] Stopped running bot "${targetBotName}" due to code change.`);
+                 } catch (killError) {
+                     console.error(`[Edit Text Code] Error stopping bot "${targetBotName}" before edit:`, killError);
+                     // Continue anyway
+                 }
+            }
+            // Clear logs as code changed
+            botInfo.logs = [];
+
+            ctx.reply(`✅ New Python code received and bot "${targetBotName}" updated successfully!
+⚠️ The bot has been stopped if it was running. You can now:
+- Use /run_bot ${targetBotName} to run the updated version.
+- Use /req ${targetBotName} to update requirements if needed.`);
+        } catch (error) {
+            console.error('[Edit Text Code] Error saving new code:', error);
+            ctx.reply(`❌ An error occurred while saving the new code for "${targetBotName}": ${error.message}`);
+        }
+        return; // Handled edit bot code text
+    }
+    // --- End Handle receiving new code text for /edit_bot ---
     // Handle other text messages (e.g., if user types something unexpected during a flow)
     // ctx.reply("Please follow the prompts or use /help for commands.");
 });
@@ -628,7 +697,33 @@ bot.on('callback_query', async (ctx) => {
         }
         return; // Handled /req source selection
     }
-    // --- End Handle button press for /req source ---
+    // --- Handle button press for /edit_bot source ---
+    if (state && state.step === 'AWAITING_EDIT_BOT_SOURCE') {
+        const botName = state.data.botName;
+        const botInfo = managedBots.get(botName); // Get bot info for potential source viewing
+        if (!botInfo) {
+             clearUserState(userId);
+             await ctx.editMessageText(`❌ Error: Bot '${botName}' not found for editing.`);
+             return;
+        }
+
+        if (data === 'upload_file_edit') {
+            setUserState(userId, 'AWAITING_FILE_UPLOAD_EDIT', { botName }); // New state for editing upload
+            await ctx.editMessageText(`📤 Okay, please send the NEW Python file (.py) for bot "${botName}".`);
+            return; // Handled edit file upload selection
+        } else if (data === 'paste_code_edit') {
+            setUserState(userId, 'AWAITING_CODE_TEXT_EDIT', { botName }); // New state for editing paste
+            await ctx.editMessageText(`✏️ Please paste the NEW Python code for bot "${botName}".`);
+            return; // Handled edit paste code selection
+        }
+        // Optional: Handle 'view_current_code_edit' if added
+        // ...
+        // If it reaches here, it's an unexpected callback in this state
+        // await ctx.editMessageText("Unexpected button press for editing. Please start again.");
+        // clearUserState(userId);
+        // return;
+    }
+    // --- End Handle button press for /edit_bot source ---
     // Ignore callback if not in the expected state
     // ctx.reply("Unexpected button press. Please start a new action.");
 });
@@ -737,7 +832,91 @@ You can now run the bot with /run_bot ${targetBotName}.`);
          }
          return; // Handled requirements upload
     }
-    // --- End Handle requirements.txt upload for /req ---
+    // --- Handle bot file upload for /edit_bot ---
+    if (state && state.step === 'AWAITING_FILE_UPLOAD_EDIT') {
+        try {
+            const document = ctx.message.document;
+            const fileId = document.file_id;
+            const newFileName = document.file_name;
+            if (!newFileName.endsWith('.py')) {
+                 return ctx.reply('⚠️ Please upload only Python files (.py).');
+                 // State remains, user can try again
+            }
+            const targetBotName = state.data.botName;
+            clearUserState(userId); // Clear state immediately after getting data
+
+            const botInfo = managedBots.get(targetBotName);
+            if (!botInfo) {
+                return ctx.reply(`❌ Error: Target bot '${targetBotName}' not found for editing.`);
+            }
+
+            // Determine the path where the file should be saved.
+            // Option 1: Replace the existing file (keeping the managed name association)
+            // Option 2: Save with the new uploaded name (updates the managed name)
+            // Let's go with Option 1 for simplicity: overwrite the existing file content,
+            // but keep the managed fileName/path the same.
+            const targetFilePath = botInfo.filePath; // Keep the path managed by the system
+            // const newManagedFileName = newFileName; // If you wanted to change the stored name
+            // const targetFilePath = path.join(uploadsDir, newManagedFileName); // And update botInfo
+
+            const fileUrl = await ctx.telegram.getFileLink(fileId);
+            console.log(`[Edit File Upload] Attempting to download from: ${fileUrl}`);
+            let buffer;
+            try {
+                const response = await fetch(fileUrl);
+                if (!response.ok) {
+                    throw new Error(`Failed to fetch file: ${response.status} ${response.statusText}`);
+                }
+                const arrayBuffer = await response.arrayBuffer();
+                buffer = Buffer.from(arrayBuffer);
+                console.log(`[Edit File Upload] File downloaded successfully, size: ${buffer.length} bytes.`);
+            } catch (fetchError) {
+                console.error(`[Edit File Upload] Error fetching file from Telegram:`, fetchError);
+                return ctx.reply(`❌ Could not download the file from Telegram: ${fetchError.message}`);
+            }
+
+            // Write the new content to the existing bot's file path
+            fs.writeFileSync(targetFilePath, buffer);
+            console.log(`[Edit File Upload] New file content written to disk: ${targetFilePath}`);
+
+            // Update the managed bot info if the filename changed (optional, based on choice above)
+            // if (newFileName !== botInfo.fileName) {
+            //     botInfo.fileName = newFileName;
+            //     botInfo.filePath = targetFilePath;
+            // }
+
+            // Ensure requirements path exists (should already, but double-check)
+            if (!fs.existsSync(botInfo.requirementsPath)) {
+                fs.writeFileSync(botInfo.requirementsPath, '');
+            }
+
+            // Stop the bot if it's running, as the code has changed
+            if (botInfo.status === 'running' && botInfo.process) {
+                 try {
+                     botInfo.process.kill('SIGTERM');
+                     botInfo.process = null;
+                     botInfo.status = 'stopped';
+                     console.log(`[Edit File Upload] Stopped running bot "${targetBotName}" due to code change.`);
+                 } catch (killError) {
+                     console.error(`[Edit File Upload] Error stopping bot "${targetBotName}" before edit:`, killError);
+                     // Continue anyway
+                 }
+            }
+            // Clear logs as code changed
+            botInfo.logs = [];
+
+            ctx.reply(`✅ New bot file content uploaded and bot "${targetBotName}" updated successfully!
+⚠️ The bot has been stopped if it was running. You can now:
+- Use /run_bot ${targetBotName} to run the updated version.
+- Use /req ${targetBotName} to update requirements if needed.`);
+        } catch (error) {
+            console.error('[Edit File Upload] Error:', error);
+            clearUserState(userId); // Ensure state is clear on error
+            ctx.reply(`❌ Error processing the uploaded file for editing bot "${state.data.botName}": ${error.message}`);
+        }
+        return; // Handled edit bot file upload
+    }
+    // --- End Handle bot file upload for /edit_bot ---
     // Ignore document if not expecting an upload in a known state
     // ctx.reply("Please use /create_bot <name> or /req <name> first if you want to add a file.");
 });
