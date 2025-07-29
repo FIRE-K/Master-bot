@@ -341,8 +341,7 @@ bot.command('logs', (ctx) => {
 `;
     message += recentLogs.join('\n');
     if (message.length > 4000) {
-        message = message.substring(0, 4000) + '
-... (truncated)';
+        message = message.substring(0, 4000) + '\n... (truncated)';
     }
     ctx.reply(message);
 });
