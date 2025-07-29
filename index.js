@@ -574,7 +574,8 @@ bot.command('run_bot', async (ctx) => {
         }
 
         console.log(`[RunBot: ${botName}] Running Python bot: ${botInfo.filePath}`);
-        const pythonProcess = spawn('python3', [botInfo.filePath], {
+        const fullPath = path.resolve(uploadsDir, botInfo.fileName);
+        const pythonProcess = spawn('python3', [fullPath], {
             cwd: uploadsDir
         });
 
