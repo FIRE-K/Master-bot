@@ -1,4 +1,3 @@
-// index.js
 const { Telegraf, Markup } = require('telegraf'); // Import Markup for buttons
 const { exec, spawn } = require('child_process');
 const fs = require('fs');
@@ -216,10 +215,12 @@ bot.help((ctx) => {
     const helpMessage = `🤖 MASTER Bot - Help
 Commands:
 /create_bot <name> - Initiates the process to add a new Python bot with the given name.
-/edit_bot <name> - Initiates the process to edit the source code of an existing bot.
+/edit_bot <name> - Shows the current source and initiates the process to edit it.
 /delete_bot <name> - Deletes a bot. It will be stopped if currently running.
 /run_bot <name> - Starts a specific bot (installs requirements if provided).
 /stop_bot <name> - Stops a running bot.
+/status [<name>] - Shows the status of a specific bot or all bots.
+/list_bots - Lists all bots managed by this MASTER bot.
 /req <name> - Initiates the process to add requirements for an existing bot.
 /source <name> - Sends the source code and requirements for a bot as files.
 /logs <name> - Displays the last logs for a bot.
@@ -231,6 +232,45 @@ Steps to add a bot:
 4. Run your bot with /run_bot <bot_name>.`;
     ctx.reply(helpMessage);
 });
+
+// Command: List Bots
+bot.command('list_bots', (ctx) => {
+    const botNames = Array.from(managedBots.keys());
+    if (botNames.length === 0) {
+        return ctx.reply("📭 No bots are currently managed. Use /create_bot to add one!");
+    }
+    let message = "🤖 Managed Bots:\n";
+    botNames.forEach(name => {
+        message += `- ${name}\n`;
+    });
+    ctx.reply(message);
+});
+
+// Command: Status
+bot.command('status', (ctx) => {
+    const botName = ctx.message.text.split(' ')[1];
+    if (botName) {
+        // Check specific bot
+        const botInfo = managedBots.get(botName);
+        if (!botInfo) {
+           return ctx.reply(`❌ Bot "${botName}" not found.`);
+        }
+        ctx.reply(`📊 Status for bot "${botName}": *${botInfo.status.toUpperCase()}*`, { parse_mode: 'Markdown' });
+    } else {
+        // Show status for all bots
+        const botNames = Array.from(managedBots.keys());
+        if (botNames.length === 0) {
+            return ctx.reply("📭 No bots are currently managed. Use /create_bot to add one!");
+        }
+        let message = "📊 Status for all bots:\n";
+        botNames.forEach(name => {
+            const status = managedBots.get(name).status;
+            message += `- ${name}: *${status.toUpperCase()}*\n`;
+        });
+        ctx.reply(message, { parse_mode: 'Markdown' });
+    }
+});
+
 
 // Command: Run bot
 bot.command('run_bot', async (ctx) => {
@@ -510,8 +550,8 @@ bot.command('source', async (ctx) => {
 });
 // --- End NEW COMMAND: /source <bot> (Send as Files) ---
 
-// --- NEW COMMAND: /edit_bot <bot> ---
-bot.command('edit_bot', (ctx) => {
+// --- NEW COMMAND: /edit_bot <bot> (Show current source first) ---
+bot.command('edit_bot', async (ctx) => {
     const userId = ctx.from.id;
     const botName = ctx.message.text.split(' ')[1];
     if (!botName) {
@@ -522,14 +562,28 @@ bot.command('edit_bot', (ctx) => {
         return ctx.reply(`❌ Bot "${botName}" not found.`);
     }
 
-    // Optional: Ask user if they want to see current source first?
-    // For now, directly ask how to provide new source.
+    // 1. Send current source code file
+    try {
+        if (fs.existsSync(botInfo.filePath)) {
+            await ctx.replyWithDocument({ source: botInfo.filePath }, {
+                caption: `📄 Current code for bot: ${botName}`
+            });
+            console.log(`[EditBot] Sent current code file for ${botName}`);
+        } else {
+             await ctx.reply(`📝 No current Python code file found for bot "${botName}".`);
+        }
+    } catch (sendError) {
+        console.error(`[EditBot] Error sending current code file for ${botName}:`, sendError);
+        await ctx.reply(`⚠️ Could not display current code for "${botName}". You can still edit it:\n${sendError.message}`);
+        // Continue to ask for new code anyway
+    }
+
+    // 2. Ask how to provide new source
     setUserState(userId, 'AWAITING_EDIT_BOT_SOURCE', { botName: botName });
-    ctx.reply(`📝 How would you like to provide the NEW code for "${botName}"?`,
+    await ctx.reply(`📝 How would you like to provide the NEW code for "${botName}"?`,
         Markup.inlineKeyboard([
             Markup.button.callback('📤 Upload New .py File', 'upload_file_edit'),
             Markup.button.callback('✏️ Paste New Code Text', 'paste_code_edit')
-            // Optional: Markup.button.callback('👀 View Current Code First', 'view_current_code_edit')
         ])
     );
 });
@@ -768,12 +822,13 @@ bot.on('callback_query', async (ctx) => {
     // --- Handle button press for /edit_bot source ---
     if (state && state.step === 'AWAITING_EDIT_BOT_SOURCE') {
         const botName = state.data.botName;
-        const botInfo = managedBots.get(botName); // Get bot info for potential source viewing
-        if (!botInfo) {
-             clearUserState(userId);
-             await ctx.editMessageText(`❌ Error: Bot '${botName}' not found for editing.`);
-             return;
-        }
+        // Note: We already sent the current source in the command handler
+        // const botInfo = managedBots.get(botName); // Get bot info for potential source viewing
+        // if (!botInfo) {
+        //      clearUserState(userId);
+        //      await ctx.editMessageText(`❌ Error: Bot '${botName}' not found for editing.`);
+        //      return;
+        // }
 
         if (data === 'upload_file_edit') {
             setUserState(userId, 'AWAITING_FILE_UPLOAD_EDIT', { botName }); // New state for editing upload
