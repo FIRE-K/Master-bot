@@ -127,7 +127,7 @@ async function stopBot(botName) {
 
 // Command: Run bot
 bot.command('run_bot', async (ctx) => {
-    console.log("[DEBUG] /run_bot command handler triggered");
+    // console.log("[DEBUG] /run_bot command handler triggered");
     const botName = ctx.message.text.split(' ')[1];
 
     if (!botName) {
