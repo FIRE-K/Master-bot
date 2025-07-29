@@ -262,8 +262,7 @@ bot.command('run_bot', async (ctx) => {
             const errorMessage = installError.message.length > 300 ?
                 installError.message.substring(0, 300) + '... (truncated)' :
                 installError.message;
-            await ctx.telegram.editMessageText(ctx.chat.id, installingMsg.message_id, undefined, `❌ Failed to install requirements for "${botName}". Bot not runned.
-Error: ${errorMessage}`);
+            await ctx.telegram.editMessageText(ctx.chat.id, installingMsg.message_id, undefined, `❌ Failed to install requirements for "${botName}". Bot not runned.\nError: ${errorMessage}`);
             return; // Stop if install failed
         }
         console.log(`[RunBot: ${botName}] Running Python bot: ${botInfo.filePath} using Python: ${venvPythonPathForBot}`);
@@ -272,25 +271,99 @@ Error: ${errorMessage}`);
         const pythonProcess = spawn(venvPythonPathForBot, [fullPath], {
             cwd: uploadsDir
         });
+
+        // --- Enhanced Error Handling for User Bot Process ---
+        let errorDetected = false;
+        let errorOutput = "";
+        const maxErrorOutputLength = 3500; // Limit size sent to Telegram
+
         botInfo.process = pythonProcess;
         botInfo.status = 'running';
         botInfo.logs = []; // Clear previous logs on restart
+
+        // Capture STDOUT
         pythonProcess.stdout.on('data', (data) => {
             const log = data.toString();
             botInfo.logs.push(`[STDOUT] ${log}`);
             console.log(`[${botName}] ${log}`);
+            // Optional: Forward user bot's stdout to Telegram (can be spammy)
+            // ctx.reply(`[${botName} STDOUT]: ${log.substring(0, 4000)}`); // Limit length
         });
+
+        // Capture STDERR - Key for detecting user code errors
         pythonProcess.stderr.on('data', (data) => {
             const log = data.toString();
             botInfo.logs.push(`[STDERR] ${log}`);
-            console.error(`[${botName}] ${log}`);
+            console.error(`[${botName}] [STDERR] ${log}`);
+
+            // Detect potential errors (basic heuristic)
+            if (!errorDetected && (log.toLowerCase().includes('error') || log.toLowerCase().includes('exception') || log.toLowerCase().includes('traceback'))) {
+                errorDetected = true;
+            }
+
+            // Accumulate error output for reporting
+            if (errorDetected) {
+                 errorOutput += log;
+                 if (errorOutput.length > maxErrorOutputLength * 2) { // Stop accumulating if too large
+                      errorOutput = errorOutput.substring(0, maxErrorOutputLength) + "\n... (Error output truncated)...";
+                 }
+            }
         });
-        pythonProcess.on('close', (code) => {
+
+        // Handle process exit
+        pythonProcess.on('close', (code, signal) => {
+            const exitLog = `[EXIT] Process exited with code ${code}${signal ? ` (signal: ${signal})` : ''}`;
+            botInfo.logs.push(exitLog);
+            console.log(`[${botName}] ${exitLog}`);
             botInfo.status = 'stopped';
             botInfo.process = null;
-            botInfo.logs.push(`[EXIT] Process exited with code ${code}`);
-            console.log(`[${botName}] Process exited with code ${code}`);
+
+            // Determine final message based on exit code and errors detected
+            if (code === 0) {
+                // Normal exit
+                ctx.reply(`✅ Bot "${botName}" finished running normally.`);
+            } else if (code === null && signal) {
+                // Killed by signal (e.g., SIGTERM from /stop_bot)
+                if (signal === 'SIGTERM') {
+                   ctx.reply(`⏹️ Bot "${botName}" was stopped successfully.`);
+                } else {
+                   ctx.reply(`⚠️ Bot "${botName}" was terminated by signal: ${signal}`);
+                }
+            } else {
+                // Non-zero exit code or error detected via stderr
+                let errorMsg = `⚠️ Bot "${botName}" stopped`;
+                if (code !== null) {
+                    errorMsg += ` with exit code ${code}`;
+                }
+                if (signal) {
+                    errorMsg += ` (signal: ${signal})`;
+                }
+                errorMsg += '.';
+
+                if (errorDetected && errorOutput.trim() !== "") {
+                    errorMsg += `\n\nPotential error detected in your bot's code:\n\`\`\`\n${errorOutput.substring(0, maxErrorOutputLength)}${errorOutput.length > maxErrorOutputLength ? '\n... (truncated)' : ''}\n\`\`\``;
+                    ctx.reply(errorMsg, { parse_mode: 'Markdown' });
+                } else if (code !== 0) {
+                    // Non-zero exit without obvious stderr error message
+                    errorMsg += " Check /logs for details.";
+                    ctx.reply(errorMsg);
+                } else {
+                    // Shouldn't usually happen with code 0 and errorDetected, but just in case
+                    ctx.reply(errorMsg);
+                }
+            }
         });
+
+        // Handle spawn error (e.g., command not found, permissions)
+        pythonProcess.on('error', (error) => {
+            console.error(`[RunBot] Error spawning process for bot "${botName}":`, error);
+            botInfo.status = 'stopped';
+            botInfo.process = null;
+            botInfo.logs.push(`[SPAWN ERROR] ${error.message}`);
+            ctx.reply(`❌ Failed to start bot "${botName}". Error: ${error.message}`);
+        });
+        // --- End Enhanced Error Handling ---
+
         ctx.reply(`🚀 Bot "${botName}" started successfully!`);
     } catch (error) {
         console.error('[RunBot] Unexpected error:', error);
@@ -313,11 +386,16 @@ bot.command('stop_bot', (ctx) => {
     }
     try {
         if (botInfo.process) {
-            botInfo.process.kill('SIGTERM');
-            botInfo.process = null;
+            botInfo.process.kill('SIGTERM'); // Signal handled in 'close' event
+            // Do NOT set status/process to null here, let 'close' event handler do it
+            // botInfo.process = null;
+            // botInfo.status = 'stopped';
+        } else {
+             // Shouldn't happen if status was 'running', but be safe
+             botInfo.status = 'stopped';
         }
-        botInfo.status = 'stopped';
-        ctx.reply(`⏹️ Bot "${botName}" stopped successfully!`);
+        // Send immediate feedback. Final confirmation comes from 'close' event.
+        ctx.reply(`⏹️ Stopping bot "${botName}"...`);
     } catch (error) {
         console.error('[StopBot] Error:', error);
         ctx.reply(`❌ Error stopping bot "${botName}": ${error.message}`);
@@ -338,13 +416,10 @@ bot.command('logs', (ctx) => {
         return ctx.reply(`📭 No logs available for "${botName}".`);
     }
     const recentLogs = botInfo.logs.slice(-25);
-    let message = `📋 Logs for ${botName}:
-`;
-    message += recentLogs.join('
-');
+    let message = `📋 Logs for ${botName}:\n`;
+    message += recentLogs.join('\n');
     if (message.length > 4000) {
-        message = message.substring(0, 4000) + '
-... (truncated)';
+        message = message.substring(0, 4000) + '\n... (truncated)';
     }
     ctx.reply(message);
 });
@@ -581,10 +656,7 @@ bot.on('text', async (ctx) => {
                 fs.writeFileSync(requirementsPath, '');
             }
             clearUserState(userId);
-            ctx.reply(`✅ Python code received and bot "${botName}" created successfully!
-You can now:
-- Use /run_bot ${botName} to run it.
-- Use /req ${botName} to provide requirements.`);
+            ctx.reply(`✅ Python code received and bot "${botName}" created successfully!\nYou can now:\n- Use /run_bot ${botName} to run it.\n- Use /req ${botName} to provide requirements.`);
         } catch (error) {
             console.error('[Text Code] Error saving code:', error);
             clearUserState(userId);
@@ -606,8 +678,7 @@ You can now:
             fs.writeFileSync(botInfo.requirementsPath, messageText);
             console.log(`[Req Text] Requirements text saved to ${botInfo.requirementsPath}`);
             clearUserState(userId);
-            ctx.reply(`✅ Requirements text saved for bot "${targetBotName}"!
-You can now run the bot with /run_bot ${targetBotName}.`);
+            ctx.reply(`✅ Requirements text saved for bot "${targetBotName}"!\nYou can now run the bot with /run_bot ${targetBotName}.`);
         } catch (error) {
             console.error('[Req Text] Error saving requirements:', error);
             clearUserState(userId);
@@ -647,10 +718,7 @@ You can now run the bot with /run_bot ${targetBotName}.`);
             // Clear logs as code changed
             botInfo.logs = [];
 
-            ctx.reply(`✅ New Python code received and bot "${targetBotName}" updated successfully!
-⚠️ The bot has been stopped if it was running. You can now:
-- Use /run_bot ${targetBotName} to run the updated version.
-- Use /req ${targetBotName} to update requirements if needed.`);
+            ctx.reply(`✅ New Python code received and bot "${targetBotName}" updated successfully!\n⚠️ The bot has been stopped if it was running. You can now:\n- Use /run_bot ${targetBotName} to run the updated version.\n- Use /req ${targetBotName} to update requirements if needed.`);
         } catch (error) {
             console.error('[Edit Text Code] Error saving new code:', error);
             ctx.reply(`❌ An error occurred while saving the new code for "${targetBotName}": ${error.message}`);
@@ -779,10 +847,7 @@ bot.on('document', async (ctx) => {
                 fs.writeFileSync(requirementsPath, '');
             }
             clearUserState(userId);
-            ctx.reply(`✅ Bot file "${fileName}" uploaded and bot "${botName}" created successfully!
-You can now:
-- Use /run_bot ${botName} to run it.
-- Use /req ${botName} to provide requirements.`);
+            ctx.reply(`✅ Bot file "${fileName}" uploaded and bot "${botName}" created successfully!\nYou can now:\n- Use /run_bot ${botName} to run it.\n- Use /req ${botName} to provide requirements.`);
         } catch (error) {
             console.error('[File Upload] Error:', error);
             clearUserState(userId); // Clear state on error
@@ -824,8 +889,7 @@ You can now:
              }
              fs.writeFileSync(botInfo.requirementsPath, buffer);
              console.log(`[Req Upload] File written to disk: ${botInfo.requirementsPath}`);
-             ctx.reply(`✅ requirements.txt successfully uploaded and linked to bot "${targetBotName}"!
-You can now run the bot with /run_bot ${targetBotName}.`);
+             ctx.reply(`✅ requirements.txt successfully uploaded and linked to bot "${targetBotName}"!\nYou can now run the bot with /run_bot ${targetBotName}.`);
          } catch (error) {
              console.error('[Req Upload] Error:', error);
              ctx.reply(`❌ Error processing the uploaded requirements.txt file for "${targetBotName}": ${error.message}`);
@@ -905,10 +969,7 @@ You can now run the bot with /run_bot ${targetBotName}.`);
             // Clear logs as code changed
             botInfo.logs = [];
 
-            ctx.reply(`✅ New bot file content uploaded and bot "${targetBotName}" updated successfully!
-⚠️ The bot has been stopped if it was running. You can now:
-- Use /run_bot ${targetBotName} to run the updated version.
-- Use /req ${targetBotName} to update requirements if needed.`);
+            ctx.reply(`✅ New bot file content uploaded and bot "${targetBotName}" updated successfully!\n⚠️ The bot has been stopped if it was running. You can now:\n- Use /run_bot ${targetBotName} to run the updated version.\n- Use /req ${targetBotName} to update requirements if needed.`);
         } catch (error) {
             console.error('[Edit File Upload] Error:', error);
             clearUserState(userId); // Ensure state is clear on error
