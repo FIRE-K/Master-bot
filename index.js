@@ -125,6 +125,142 @@ async function stopBot(botName) {
 }
 // --- End Helper to Stop a Bot ---
 
+// Command: Run bot
+bot.command('run_bot', async (ctx) => {
+    console.log("[DEBUG] /run_bot command handler triggered");
+    const botName = ctx.message.text.split(' ')[1];
+
+    if (!botName) {
+        return ctx.reply('⚠️ Usage: /run_bot <bot_name>');
+    }
+
+    const botInfo = managedBots.get(botName);
+    if (!botInfo) {
+        return ctx.reply(`❌ Bot "${botName}" not found.`);
+    }
+
+    if (botInfo.status === 'running') {
+        return ctx.reply(`ℹ️ Bot "${botName}" is already running.`);
+    }
+
+    try {
+        const installingMsg = await ctx.reply(`⏳ Installing requirements for "${botName}" (if any)...`);
+        try {
+            await installRequirements(botInfo.requirementsPath, botName);
+            await ctx.telegram.editMessageText(ctx.chat.id, installingMsg.message_id, undefined, `✅ Requirements installed (or none found) for "${botName}".`);
+        } catch (installError) {
+            console.error(`[RunBot] Error installing requirements for ${botName}:`, installError);
+            // Detailed error sent to user
+            const errorMessage = installError.message.length > 300 ?
+                installError.message.substring(0, 300) + '... (truncated)' :
+                installError.message;
+            await ctx.telegram.editMessageText(ctx.chat.id, installingMsg.message_id, undefined, `❌ Failed to install requirements for "${botName}". Bot not runned.\nError: ${errorMessage}`);
+            return; // Stop if install failed
+        }
+
+        console.log(`[RunBot: ${botName}] Running Python bot: ${botInfo.filePath}`);
+        const fullPath = path.resolve(uploadsDir, botInfo.fileName);
+        const pythonProcess = spawn('python3', [fullPath], {
+            cwd: uploadsDir
+        });
+
+        botInfo.process = pythonProcess;
+        botInfo.status = 'running';
+        botInfo.logs = []; // Clear previous logs on restart
+
+        pythonProcess.stdout.on('data', (data) => {
+            const log = data.toString();
+            botInfo.logs.push(`[STDOUT] ${log}`);
+            console.log(`[${botName}] ${log}`);
+        });
+
+        pythonProcess.stderr.on('data', (data) => {
+            const log = data.toString();
+            botInfo.logs.push(`[STDERR] ${log}`);
+            console.error(`[${botName}] ${log}`);
+        });
+
+        pythonProcess.on('close', (code) => {
+            botInfo.status = 'stopped';
+            botInfo.process = null;
+            botInfo.logs.push(`[EXIT] Process exited with code ${code}`);
+            console.log(`[${botName}] Process exited with code ${code}`);
+        });
+
+        ctx.reply(`🚀 Bot "${botName}" started successfully!`);
+    } catch (error) {
+        console.error('[RunBot] Unexpected error:', error);
+        ctx.reply(`❌ Error running bot "${botName}": ${error.message}`);
+    }
+});
+
+// Command: Stop bot
+bot.command('stop_bot', (ctx) => {
+    const botName = ctx.message.text.split(' ')[1];
+
+    if (!botName) {
+        return ctx.reply('⚠️ Usage: /stop_bot <bot_name>');
+    }
+
+    const botInfo = managedBots.get(botName);
+    if (!botInfo) {
+        return ctx.reply(`❌ Bot "${botName}" not found.`);
+    }
+
+    if (botInfo.status === 'stopped') {
+        return ctx.reply(`ℹ️ Bot "${botName}" is already stopped.`);
+    }
+
+    try {
+        if (botInfo.process) {
+            botInfo.process.kill('SIGTERM');
+            botInfo.process = null;
+        }
+        botInfo.status = 'stopped';
+        ctx.reply(`⏹️ Bot "${botName}" stopped successfully!`);
+    } catch (error) {
+        console.error('[StopBot] Error:', error);
+        ctx.reply(`❌ Error stopping bot "${botName}": ${error.message}`);
+    }
+});
+
+// Command: View logs
+bot.command('logs', (ctx) => {
+    const botName = ctx.message.text.split(' ')[1];
+
+    if (!botName) {
+        return ctx.reply('⚠️ Usage: /logs <bot_name>');
+    }
+
+    const botInfo = managedBots.get(botName);
+    if (!botInfo) {
+        return ctx.reply(`❌ Bot "${botName}" not found.`);
+    }
+
+    if (botInfo.logs.length === 0) {
+        return ctx.reply(`📭 No logs available for "${botName}".`);
+    }
+
+    const recentLogs = botInfo.logs.slice(-25);
+    let message = `📋 Logs for ${botName}:\n\n`;
+    message += recentLogs.join('\n');
+
+    if (message.length > 4000) {
+        message = message.substring(0, 4000) + '\n... (truncated)';
+    }
+
+    ctx.reply(message);
+});
+
+// Error handling for the bot itself (catches errors in middleware/handlers)
+bot.catch((err, ctx) => {
+    console.error('Bot error:', err); // Always log to console for debugging
+    // Clear user state on bot error to prevent getting stuck
+    clearUserState(ctx.from.id);
+    // Send a generic error message to the user
+    ctx.reply('❌ An unexpected error occurred in the master bot. Please try your command again.');
+});
+
 // Command: Start
 bot.start((ctx) => {
     const welcomeMessage = `🤖 Welcome to the MASTER Bot!
@@ -293,141 +429,6 @@ bot.command('delete_bot', async (ctx) => {
     }
 });
 
-// Command: Run bot
-bot.command('run_bot', async (ctx) => {
-    console.log("[DEBUG] /run_bot command handler triggered");
-    const botName = ctx.message.text.split(' ')[1];
-
-    if (!botName) {
-        return ctx.reply('⚠️ Usage: /run_bot <bot_name>');
-    }
-
-    const botInfo = managedBots.get(botName);
-    if (!botInfo) {
-        return ctx.reply(`❌ Bot "${botName}" not found.`);
-    }
-
-    if (botInfo.status === 'running') {
-        return ctx.reply(`ℹ️ Bot "${botName}" is already running.`);
-    }
-
-    try {
-        const installingMsg = await ctx.reply(`⏳ Installing requirements for "${botName}" (if any)...`);
-        try {
-            await installRequirements(botInfo.requirementsPath, botName);
-            await ctx.telegram.editMessageText(ctx.chat.id, installingMsg.message_id, undefined, `✅ Requirements installed (or none found) for "${botName}".`);
-        } catch (installError) {
-            console.error(`[RunBot] Error installing requirements for ${botName}:`, installError);
-            // Detailed error sent to user
-            const errorMessage = installError.message.length > 300 ?
-                installError.message.substring(0, 300) + '... (truncated)' :
-                installError.message;
-            await ctx.telegram.editMessageText(ctx.chat.id, installingMsg.message_id, undefined, `❌ Failed to install requirements for "${botName}". Bot not runned.\nError: ${errorMessage}`);
-            return; // Stop if install failed
-        }
-
-        console.log(`[RunBot: ${botName}] Running Python bot: ${botInfo.filePath}`);
-        const fullPath = path.resolve(uploadsDir, botInfo.fileName);
-        const pythonProcess = spawn('python3', [fullPath], {
-            cwd: uploadsDir
-        });
-
-        botInfo.process = pythonProcess;
-        botInfo.status = 'running';
-        botInfo.logs = []; // Clear previous logs on restart
-
-        pythonProcess.stdout.on('data', (data) => {
-            const log = data.toString();
-            botInfo.logs.push(`[STDOUT] ${log}`);
-            console.log(`[${botName}] ${log}`);
-        });
-
-        pythonProcess.stderr.on('data', (data) => {
-            const log = data.toString();
-            botInfo.logs.push(`[STDERR] ${log}`);
-            console.error(`[${botName}] ${log}`);
-        });
-
-        pythonProcess.on('close', (code) => {
-            botInfo.status = 'stopped';
-            botInfo.process = null;
-            botInfo.logs.push(`[EXIT] Process exited with code ${code}`);
-            console.log(`[${botName}] Process exited with code ${code}`);
-        });
-
-        ctx.reply(`🚀 Bot "${botName}" started successfully!`);
-    } catch (error) {
-        console.error('[RunBot] Unexpected error:', error);
-        ctx.reply(`❌ Error running bot "${botName}": ${error.message}`);
-    }
-});
-
-// Command: Stop bot
-bot.command('stop_bot', (ctx) => {
-    const botName = ctx.message.text.split(' ')[1];
-
-    if (!botName) {
-        return ctx.reply('⚠️ Usage: /stop_bot <bot_name>');
-    }
-
-    const botInfo = managedBots.get(botName);
-    if (!botInfo) {
-        return ctx.reply(`❌ Bot "${botName}" not found.`);
-    }
-
-    if (botInfo.status === 'stopped') {
-        return ctx.reply(`ℹ️ Bot "${botName}" is already stopped.`);
-    }
-
-    try {
-        if (botInfo.process) {
-            botInfo.process.kill('SIGTERM');
-            botInfo.process = null;
-        }
-        botInfo.status = 'stopped';
-        ctx.reply(`⏹️ Bot "${botName}" stopped successfully!`);
-    } catch (error) {
-        console.error('[StopBot] Error:', error);
-        ctx.reply(`❌ Error stopping bot "${botName}": ${error.message}`);
-    }
-});
-
-// Command: View logs
-bot.command('logs', (ctx) => {
-    const botName = ctx.message.text.split(' ')[1];
-
-    if (!botName) {
-        return ctx.reply('⚠️ Usage: /logs <bot_name>');
-    }
-
-    const botInfo = managedBots.get(botName);
-    if (!botInfo) {
-        return ctx.reply(`❌ Bot "${botName}" not found.`);
-    }
-
-    if (botInfo.logs.length === 0) {
-        return ctx.reply(`📭 No logs available for "${botName}".`);
-    }
-
-    const recentLogs = botInfo.logs.slice(-25);
-    let message = `📋 Logs for ${botName}:\n\n`;
-    message += recentLogs.join('\n');
-
-    if (message.length > 4000) {
-        message = message.substring(0, 4000) + '\n... (truncated)';
-    }
-
-    ctx.reply(message);
-});
-
-// Error handling for the bot itself (catches errors in middleware/handlers)
-bot.catch((err, ctx) => {
-    console.error('Bot error:', err); // Always log to console for debugging
-    // Clear user state on bot error to prevent getting stuck
-    clearUserState(ctx.from.id);
-    // Send a generic error message to the user
-    ctx.reply('❌ An unexpected error occurred in the master bot. Please try your command again.');
-});
 
 // Handle text input based on user state
 bot.on('text', async (ctx) => {
