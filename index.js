@@ -339,8 +339,7 @@ bot.command('logs', (ctx) => {
     const recentLogs = botInfo.logs.slice(-25);
     let message = `📋 Logs for ${botName}:
 `;
-    message += recentLogs.join('
-');
+    message += recentLogs.join('\n');
     if (message.length > 4000) {
         message = message.substring(0, 4000) + '
 ... (truncated)';
