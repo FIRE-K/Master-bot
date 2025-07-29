@@ -677,7 +677,7 @@ bot.catch((err, ctx) => {
 });
 
 // Start the bot
-bot.launch()
+bot.launch({ polling: true })
     .then(() => {
         console.log('🚀 Telegram Master Bot started!');
     })
