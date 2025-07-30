@@ -17,6 +17,13 @@ const managedBots = new Map();
 // Track state for multi-step interactions
 const userStates = {}; // userId -> { step: '...',  {...} }
 
+// Track bots waiting for user input
+// Maps chatId -> { botName: string, process: ChildProcess, prompt: string, timeoutId: NodeJS.Timeout }
+const botsAwaitingInput = new Map();
+
+// Timeout for input requests (e.g., 5 minutes)
+const INPUT_TIMEOUT_MS = 5 * 60 * 1000;
+
 // Initialize Express app for health checks
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -185,12 +192,12 @@ function clearUserState(userId) {
 }
 // --- End State Management Helpers ---
 
-// --- Helper to Stop a Bot (for deletion/editing) ---
-async function stopBot(botName) {
+// --- Helper to Stop a Bot (for deletion/editing/stopping) ---
+async function stopBot(botName, signal = 'SIGTERM') {
     const botInfo = managedBots.get(botName);
     if (botInfo && botInfo.status === 'running' && botInfo.process) {
         try {
-            botInfo.process.kill('SIGTERM');
+            botInfo.process.kill(signal);
             botInfo.process = null;
         } catch (error) {
             console.error(`[StopBotHelper] Error killing process for ${botName}:`, error);
@@ -200,8 +207,31 @@ async function stopBot(botName) {
     if (botInfo) {
         botInfo.status = 'stopped';
     }
+    // Also clear any pending input state for this bot
+    for (const [chatId, inputData] of botsAwaitingInput.entries()) {
+        if (inputData.botName === botName) {
+            clearTimeout(inputData.timeoutId);
+            botsAwaitingInput.delete(chatId);
+            // Optionally notify user input was cancelled due to stop
+            // await bot.telegram.sendMessage(chatId, `⚠️ Input request for bot "${botName}" was cancelled because the bot stopped.`);
+        }
+    }
 }
 // --- End Helper to Stop a Bot ---
+
+// --- Helper for Input Timeout ---
+function setInputTimeout(chatId, botName, prompt) {
+   const timeoutId = setTimeout(() => {
+       const inputData = botsAwaitingInput.get(chatId);
+       if (inputData && inputData.botName === botName) { // Double-check it's still the same request
+            botsAwaitingInput.delete(chatId);
+            // Send timeout message to user
+            bot.telegram.sendMessage(chatId, `⏰ Input request timed out for bot "${botName}". Prompt was: ${prompt}`);
+       }
+   }, INPUT_TIMEOUT_MS);
+   return timeoutId;
+}
+// --- End Helper for Input Timeout ---
 
 // Command: Start
 bot.start((ctx) => {
@@ -216,9 +246,9 @@ bot.help((ctx) => {
     const helpMessage = `🤖 MASTER Bot - Help
 Commands:
 /create_bot <name> - Initiates the process to add a new Python bot with the given name.
-/edit_bot <name> - Shows the current source and initiates the process to edit it.
+/edit_bot <name> - Asks how to provide new code, then shows current code.
 /delete_bot <name> - Deletes a bot. It will be stopped if currently running.
-/run_bot <name> - Starts a specific bot (installs requirements if provided).
+/run_bot <name> - Starts a specific bot (installs requirements if provided). Supports print/input!
 /stop_bot <name> - Stops a running bot.
 /status [<name>] - Shows the status of a specific bot or all bots.
 /list_bots - Lists all bots managed by this MASTER bot.
@@ -275,7 +305,7 @@ bot.command('status', (ctx) => {
 
 // Command: Run bot
 bot.command('run_bot', async (ctx) => {
-    // console.log("[DEBUG] /run_bot command handler triggered");
+    const chatId = ctx.chat.id;
     const botName = ctx.message.text.split(' ')[1];
     if (!botName) {
         return ctx.reply('⚠️ Usage: /run_bot <bot_name>');
@@ -310,10 +340,11 @@ bot.command('run_bot', async (ctx) => {
         const fullPath = path.resolve(uploadsDir, botInfo.fileName);
         // Use venvPythonPathForBot instead of 'python3'
         const pythonProcess = spawn(venvPythonPathForBot, [fullPath], {
-            cwd: uploadsDir
+            cwd: uploadsDir,
+            stdio: ['pipe', 'pipe', 'pipe'] // Explicitly set stdin, stdout, stderr to pipes
         });
 
-        // --- Enhanced Error Handling for User Bot Process ---
+        // --- Enhanced Error Handling and I/O for User Bot Process ---
         let errorDetected = false;
         let errorOutput = "";
         const maxErrorOutputLength = 3500; // Limit size sent to Telegram
@@ -322,13 +353,42 @@ bot.command('run_bot', async (ctx) => {
         botInfo.status = 'running';
         botInfo.logs = []; // Clear previous logs on restart
 
-        // Capture STDOUT
+        let stdoutBuffer = ''; // Buffer to accumulate partial stdout lines
+
+        // Capture STDOUT - Key for print() and detecting input prompts
         pythonProcess.stdout.on('data', (data) => {
-            const log = data.toString();
-            botInfo.logs.push(`[STDOUT] ${log}`);
-            console.log(`[${botName}] ${log}`);
-            // Optional: Forward user bot's stdout to Telegram (can be spammy)
-            // ctx.reply(`[${botName} STDOUT]: ${log.substring(0, 4000)}`); // Limit length
+            const chunk = data.toString();
+            botInfo.logs.push(`[STDOUT] ${chunk}`);
+            console.log(`[${botName}] [STDOUT] ${chunk}`);
+
+            stdoutBuffer += chunk;
+
+            // Process complete lines
+            let lines = stdoutBuffer.split('\n');
+            // Keep the last potentially incomplete line in the buffer
+            stdoutBuffer = lines.pop();
+
+            // Send complete lines to user
+            lines.forEach(line => {
+                if (line.trim() !== '') { // Avoid sending empty lines
+                    ctx.reply(`\`${botName}\` >> ${line}`, { parse_mode: 'Markdown' });
+                }
+            });
+
+            // Check if the remaining buffer (potentially incomplete line) looks like a prompt
+            // Heuristic: Ends with a common prompt character and no trailing newline
+            if (stdoutBuffer && /[:?]$/.test(stdoutBuffer.trim())) {
+                 // Looks like a prompt, wait for user input
+                 // Clear any existing input request for this chat
+                 const existingRequest = botsAwaitingInput.get(chatId);
+                 if (existingRequest) {
+                     clearTimeout(existingRequest.timeoutId);
+                 }
+                 const timeoutId = setInputTimeout(chatId, botName, stdoutBuffer);
+                 botsAwaitingInput.set(chatId, { botName, process: pythonProcess, prompt: stdoutBuffer, timeoutId });
+                 ctx.reply(`\`${botName}\` [INPUT] >> ${stdoutBuffer}`, { parse_mode: 'Markdown' });
+                 stdoutBuffer = ''; // Clear buffer after treating as prompt
+            }
         });
 
         // Capture STDERR - Key for detecting user code errors
@@ -353,11 +413,24 @@ bot.command('run_bot', async (ctx) => {
 
         // Handle process exit
         pythonProcess.on('close', (code, signal) => {
+            // Flush any remaining stdout buffer
+            if (stdoutBuffer && stdoutBuffer.trim() !== '') {
+                ctx.reply(`\`${botName}\` >> ${stdoutBuffer}`, { parse_mode: 'Markdown' });
+            }
+            stdoutBuffer = ''; // Clear buffer
+
             const exitLog = `[EXIT] Process exited with code ${code}${signal ? ` (signal: ${signal})` : ''}`;
             botInfo.logs.push(exitLog);
             console.log(`[${botName}] ${exitLog}`);
             botInfo.status = 'stopped';
             botInfo.process = null;
+
+            // Clear any pending input state for this bot/chat
+            if (botsAwaitingInput.get(chatId)?.botName === botName) {
+                const inputData = botsAwaitingInput.get(chatId);
+                clearTimeout(inputData.timeoutId);
+                botsAwaitingInput.delete(chatId);
+            }
 
             // Determine final message based on exit code and errors detected
             if (code === 0) {
@@ -426,16 +499,9 @@ bot.command('stop_bot', (ctx) => {
         return ctx.reply(`ℹ️ Bot "${botName}" is already stopped.`);
     }
     try {
-        if (botInfo.process) {
-            botInfo.process.kill('SIGTERM'); // Signal handled in 'close' event
-            // Do NOT set status/process to null here, let 'close' event handler do it
-            // botInfo.process = null;
-            // botInfo.status = 'stopped';
-        } else {
-             // Shouldn't happen if status was 'running', but be safe
-             botInfo.status = 'stopped';
-        }
-        // Send immediate feedback. Final confirmation comes from 'close' event.
+        // stopBot helper now handles process killing and clearing input state
+        stopBot(botName, 'SIGTERM');
+        // Send immediate feedback.
         ctx.reply(`⏹️ Stopping bot "${botName}"...`);
     } catch (error) {
         console.error('[StopBot] Error:', error);
@@ -551,7 +617,7 @@ bot.command('source', async (ctx) => {
 });
 // --- End NEW COMMAND: /source <bot> (Send as Files) ---
 
-// --- NEW COMMAND: /edit_bot <bot> (Show current source first) ---
+// --- NEW COMMAND: /edit_bot <bot> (Ask how first, then show current) ---
 bot.command('edit_bot', async (ctx) => {
     const userId = ctx.from.id;
     const botName = ctx.message.text.split(' ')[1];
@@ -563,23 +629,7 @@ bot.command('edit_bot', async (ctx) => {
         return ctx.reply(`❌ Bot "${botName}" not found.`);
     }
 
-    // 1. Send current source code file
-    try {
-        if (fs.existsSync(botInfo.filePath)) {
-            await ctx.replyWithDocument({ source: botInfo.filePath }, {
-                caption: `📄 Current code for bot: ${botName}`
-            });
-            console.log(`[EditBot] Sent current code file for ${botName}`);
-        } else {
-             await ctx.reply(`📝 No current Python code file found for bot "${botName}".`);
-        }
-    } catch (sendError) {
-        console.error(`[EditBot] Error sending current code file for ${botName}:`, sendError);
-        await ctx.reply(`⚠️ Could not display current code for "${botName}". You can still edit it:\n${sendError.message}`);
-        // Continue to ask for new code anyway
-    }
-
-    // 2. Ask how to provide new source
+    // 1. Ask how to provide new source FIRST
     setUserState(userId, 'AWAITING_EDIT_BOT_SOURCE', { botName: botName });
     await ctx.reply(`📝 How would you like to provide the NEW code for "${botName}"?`,
         Markup.inlineKeyboard([
@@ -587,6 +637,24 @@ bot.command('edit_bot', async (ctx) => {
             Markup.button.callback('✏️ Paste New Code Text', 'paste_code_edit')
         ])
     );
+
+    // 2. Send current source code file AFTER asking
+    try {
+        if (fs.existsSync(botInfo.filePath)) {
+            await ctx.replyWithDocument({ source: botInfo.filePath }, {
+                caption: `📄 *(For reference)* Current code for bot: ${botName}`,
+                parse_mode: 'Markdown'
+            });
+            console.log(`[EditBot] Sent current code file for ${botName} (after asking)`);
+        } else {
+             // Less likely to happen, but possible
+             await ctx.reply(`📝 *(For reference)* No current Python code file found for bot "${botName}".`, { parse_mode: 'Markdown' });
+        }
+    } catch (sendError) {
+        console.error(`[EditBot] Error sending current code file for ${botName}:`, sendError);
+        // Don't block the flow, just inform
+        await ctx.reply(`⚠️ *(For reference)* Could not display current code for "${botName}". You can still edit it:\n${sendError.message}`, { parse_mode: 'Markdown' });
+    }
 });
 // --- End NEW COMMAND: /edit_bot <bot> ---
 
@@ -638,7 +706,7 @@ bot.command('delete_bot', async (ctx) => {
         return ctx.reply(`❌ Bot "${targetBotName}" not found.`);
     }
     try {
-        // Stop the bot if it's running
+        // Stop the bot if it's running (stopBot helper handles input state)
         await stopBot(targetBotName);
         // Delete files
         try {
@@ -679,16 +747,47 @@ bot.command('delete_bot', async (ctx) => {
     }
 });
 
-// Handle text input based on user state
+// Handle text input based on user state OR for providing input to a running bot
 bot.on('text', async (ctx) => {
     const userId = ctx.from.id;
+    const chatId = ctx.chat.id;
     const state = getUserState(userId);
     const messageText = ctx.message.text.trim();
+
+    // --- 1. Handle Input for Running Bots ---
+    const inputData = botsAwaitingInput.get(chatId);
+    if (inputData) {
+        // A bot is waiting for input from this chat
+        const { botName, process, prompt, timeoutId } = inputData;
+        clearTimeout(timeoutId); // Clear the timeout as input is received
+        botsAwaitingInput.delete(chatId); // Remove from awaiting list
+
+        try {
+            // Send the user's message as input to the bot's stdin
+            if (process.stdin.writable) {
+                process.stdin.write(messageText + '\n');
+                console.log(`[INPUT] Sent input "${messageText}" to bot "${botName}"`);
+                // Optionally confirm receipt
+                // ctx.reply(`✅ Input sent to "${botName}".`);
+            } else {
+                console.warn(`[INPUT] stdin for bot "${botName}" is not writable.`);
+                ctx.reply(`⚠️ Could not send input to bot "${botName}", its input stream seems closed.`);
+            }
+        } catch (inputError) {
+            console.error(`[INPUT] Error sending input to bot "${botName}":`, inputError);
+            ctx.reply(`❌ Error sending input to bot "${botName}": ${inputError.message}`);
+        }
+        return; // Handled as bot input
+    }
+
+
+    // --- 2. Handle Multi-step State Interactions ---
     if (!state) {
         // If user sends text outside a flow, just acknowledge or ignore
         // ctx.reply("Send a command like /create_bot <name> or /req <name>.");
         return; // Silent ignore is often better UX
     }
+
     // --- Handle receiving code text for /create_bot ---
     if (state.step === 'AWAITING_CODE_TEXT') {
         const botName = state.data.botName;
@@ -720,6 +819,7 @@ bot.on('text', async (ctx) => {
         return;
     }
     // --- End Handle receiving code text for /create_bot ---
+
     // --- Handle receiving requirements text for /req ---
     if (state.step === 'AWAITING_REQ_TEXT') {
         const targetBotName = state.data.botName;
@@ -741,6 +841,8 @@ bot.on('text', async (ctx) => {
         }
         return;
     }
+    // --- End Handle receiving requirements text for /req ---
+
     // --- Handle receiving new code text for /edit_bot ---
     if (state.step === 'AWAITING_CODE_TEXT_EDIT') {
         const targetBotName = state.data.botName;
@@ -761,9 +863,8 @@ bot.on('text', async (ctx) => {
             // Stop the bot if it's running, as the code has changed
             if (botInfo.status === 'running' && botInfo.process) {
                  try {
-                     botInfo.process.kill('SIGTERM');
-                     botInfo.process = null;
-                     botInfo.status = 'stopped';
+                     // Use helper to stop and clear input state
+                     await stopBot(targetBotName);
                      console.log(`[Edit Text Code] Stopped running bot "${targetBotName}" due to code change.`);
                  } catch (killError) {
                      console.error(`[Edit Text Code] Error stopping bot "${targetBotName}" before edit:`, killError);
@@ -781,6 +882,7 @@ bot.on('text', async (ctx) => {
         return; // Handled edit bot code text
     }
     // --- End Handle receiving new code text for /edit_bot ---
+
     // Handle other text messages (e.g., if user types something unexpected during a flow)
     // ctx.reply("Please follow the prompts or use /help for commands.");
 });
@@ -806,6 +908,7 @@ bot.on('callback_query', async (ctx) => {
         return;
     }
     // --- End Handle button press for /create_bot source ---
+
     // --- Handle button press for /req source ---
     if (state && state.step === 'AWAITING_REQ_SOURCE') {
         const targetBotName = state.data.botName;
@@ -820,16 +923,12 @@ bot.on('callback_query', async (ctx) => {
         }
         return; // Handled /req source selection
     }
+    // --- End Handle button press for /req source ---
+
     // --- Handle button press for /edit_bot source ---
     if (state && state.step === 'AWAITING_EDIT_BOT_SOURCE') {
         const botName = state.data.botName;
-        // Note: We already sent the current source in the command handler
-        // const botInfo = managedBots.get(botName); // Get bot info for potential source viewing
-        // if (!botInfo) {
-        //      clearUserState(userId);
-        //      await ctx.editMessageText(`❌ Error: Bot '${botName}' not found for editing.`);
-        //      return;
-        // }
+        // Note: We already asked how in the command handler
 
         if (data === 'upload_file_edit') {
             setUserState(userId, 'AWAITING_FILE_UPLOAD_EDIT', { botName }); // New state for editing upload
@@ -848,6 +947,7 @@ bot.on('callback_query', async (ctx) => {
         // return;
     }
     // --- End Handle button press for /edit_bot source ---
+
     // Ignore callback if not in the expected state
     // ctx.reply("Unexpected button press. Please start a new action.");
 });
@@ -912,6 +1012,7 @@ bot.on('document', async (ctx) => {
         return; // Handled bot file upload
     }
     // --- End Handle bot file upload for /create_bot ---
+
     // --- Handle requirements.txt upload for /req ---
     if (state && state.step === 'AWAITING_REQUIREMENTS_UPLOAD') {
          const targetBotName = state.data.botName;
@@ -952,6 +1053,8 @@ bot.on('document', async (ctx) => {
          }
          return; // Handled requirements upload
     }
+    // --- End Handle requirements.txt upload for /req ---
+
     // --- Handle bot file upload for /edit_bot ---
     if (state && state.step === 'AWAITING_FILE_UPLOAD_EDIT') {
         try {
@@ -1013,9 +1116,8 @@ bot.on('document', async (ctx) => {
             // Stop the bot if it's running, as the code has changed
             if (botInfo.status === 'running' && botInfo.process) {
                  try {
-                     botInfo.process.kill('SIGTERM');
-                     botInfo.process = null;
-                     botInfo.status = 'stopped';
+                     // Use helper to stop and clear input state
+                     await stopBot(targetBotName);
                      console.log(`[Edit File Upload] Stopped running bot "${targetBotName}" due to code change.`);
                  } catch (killError) {
                      console.error(`[Edit File Upload] Error stopping bot "${targetBotName}" before edit:`, killError);
@@ -1034,6 +1136,7 @@ bot.on('document', async (ctx) => {
         return; // Handled edit bot file upload
     }
     // --- End Handle bot file upload for /edit_bot ---
+
     // Ignore document if not expecting an upload in a known state
     // ctx.reply("Please use /create_bot <name> or /req <name> first if you want to add a file.");
 });
@@ -1053,6 +1156,12 @@ bot.launch({ polling: true })
 // Graceful shutdown
 process.once('SIGINT', () => {
     console.log('Received SIGINT. Shutting down gracefully...');
+    // Attempt to stop all running bots
+    for (const [botName, botInfo] of managedBots.entries()) {
+        if (botInfo.status === 'running') {
+            stopBot(botName, 'SIGINT');
+        }
+    }
     bot.stop('SIGINT')
        .then(() => console.log('Bot stopped.'))
        .catch(console.error);
@@ -1060,6 +1169,12 @@ process.once('SIGINT', () => {
 });
 process.once('SIGTERM', () => {
     console.log('Received SIGTERM. Shutting down gracefully...');
+    // Attempt to stop all running bots
+    for (const [botName, botInfo] of managedBots.entries()) {
+        if (botInfo.status === 'running') {
+            stopBot(botName, 'SIGTERM');
+        }
+    }
     bot.stop('SIGTERM')
        .then(() => console.log('Bot stopped.'))
        .catch(console.error);
