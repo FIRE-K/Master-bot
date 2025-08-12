@@ -95,9 +95,7 @@ function installRequirements(requirementsPath, botName) {
                             res();
                         } else {
                             console.error(`[StartBot: ${botName}] Failed to create virtual environment. Exit code: ${code}`);
-                            rej(new Error(`venv create failed with exit code ${code}
-Stderr:
-${createStderr}`));
+                            rej(new Error(`venv create failed with exit code ${code} Stderr: ${createStderr}`));
                         }
                     });
                     createVenvProcess.on('error', (error) => {
@@ -129,9 +127,7 @@ ${createStderr}`));
                          res();
                      } else {
                          console.error(`[StartBot: ${botName}] Failed to upgrade pip in virtual environment. Exit code: ${code}`);
-                         rej(new Error(`pip upgrade failed with exit code ${code}
-Stderr:
-${upgradeStderr}`));
+                         rej(new Error(`pip upgrade failed with exit code ${code} Stderr: ${upgradeStderr}`));
                      }
                  });
                  upgradePipProcess.on('error', (error) => {
@@ -159,9 +155,7 @@ ${upgradeStderr}`));
                     resolve({ venvPythonPath }); // Resolve with the path to the venv's Python
                 } else {
                     console.error(`[StartBot: ${botName}] Failed to install packages from ${requirementsPath} into venv. Exit code: ${code}`);
-                    reject(new Error(`pip install failed with exit code ${code}
-Stderr:
-${stderrData}`));
+                    reject(new Error(`pip install failed with exit code ${code} Stderr: ${stderrData}`));
                 }
             });
             pipProcess.on('error', (error) => {
@@ -287,11 +281,9 @@ bot.command('list_bots', (ctx) => {
     if (botNames.length === 0) {
         return ctx.reply("📭 No bots are currently managed. Use /create_bot to add one!");
     }
-    let message = "🤖 Managed Bots:
-";
+    let message = "🤖 Managed Bots:\n";
     botNames.forEach(name => {
-        message += `- ${name}
-`;
+        message += `- ${name}\n`;
     });
     ctx.reply(message);
 });
@@ -312,12 +304,10 @@ bot.command('status', (ctx) => {
         if (botNames.length === 0) {
             return ctx.reply("📭 No bots are currently managed. Use /create_bot to add one!");
         }
-        let message = "📊 Status for all bots:
-";
+        let message = "📊 Status for all bots:\n";
         botNames.forEach(name => {
             const status = managedBots.get(name).status;
-            message += `- ${name}: *${status.toUpperCase()}*
-`;
+            message += `- ${name}: *${status.toUpperCase()}*\n`;
         });
         ctx.reply(message, { parse_mode: 'Markdown' });
     }
@@ -382,8 +372,7 @@ bot.command('run_bot', async (ctx) => {
             const errorMessage = installError.message.length > 300 ?
                 installError.message.substring(0, 300) + '... (truncated)' :
                 installError.message;
-            await ctx.telegram.editMessageText(ctx.chat.id, installingMsg.message_id, undefined, `❌ Failed to install requirements for "${botName}". Bot not run.
-Error: ${errorMessage}`);
+            await ctx.telegram.editMessageText(ctx.chat.id, installingMsg.message_id, undefined, `❌ Failed to install requirements for "${botName}". Bot not run. Error: ${errorMessage}`);
             return;
         }
 
@@ -412,8 +401,7 @@ Error: ${errorMessage}`);
             console.log(`[${botName}] [STDOUT] ${chunk}`);
             stdoutBuffer += chunk;
             // Process complete lines
-            let lines = stdoutBuffer.split('
-');
+            let lines = stdoutBuffer.split('\n');
             // Keep the last potentially incomplete line in the buffer
             stdoutBuffer = lines.pop();
             // Send complete lines to user
@@ -450,8 +438,7 @@ Error: ${errorMessage}`);
             if (errorDetected) {
                  errorOutput += log;
                  if (errorOutput.length > maxErrorOutputLength * 2) { // Stop accumulating if too large
-                      errorOutput = errorOutput.substring(0, maxErrorOutputLength) + "
-... (Error output truncated)...";
+                      errorOutput = errorOutput.substring(0, maxErrorOutputLength) + "\n... (Error output truncated)...";
                  }
             }
         });
@@ -495,12 +482,7 @@ Error: ${errorMessage}`);
                 }
                 errorMsg += '.';
                 if (errorDetected && errorOutput.trim() !== "") {
-                    errorMsg += `
-Potential error detected in your bot's code:
-\`\`\`
-${errorOutput.substring(0, maxErrorOutputLength)}${errorOutput.length > maxErrorOutputLength ? '
-... (truncated)' : ''}
-\`\`\``;
+                    errorMsg += `\nPotential error detected in your bot's code:\n\`\`\`\n${errorOutput.substring(0, maxErrorOutputLength)}${errorOutput.length > maxErrorOutputLength ? '\n... (truncated)' : ''}\n\`\`\``;
                     ctx.reply(errorMsg, { parse_mode: 'Markdown' });
                 } else if (code !== 0) {
                     // Non-zero exit without obvious stderr error message
@@ -568,13 +550,10 @@ bot.command('logs', (ctx) => {
         return ctx.reply(`📭 No logs available for "${botName}".`);
     }
     const recentLogs = botInfo.logs.slice(-25);
-    let message = `📋 Logs for ${botName}:
-`;
-    message += recentLogs.join('
-');
+    let message = `📋 Logs for ${botName}:\n`;
+    message += recentLogs.join('\n');
     if (message.length > 4000) {
-        message = message.substring(0, 4000) + '
-... (truncated)';
+        message = message.substring(0, 4000) + '\n... (truncated)';
     }
     ctx.reply(message);
 });
@@ -652,11 +631,9 @@ bot.command('source', async (ctx) => {
         if (files.length === 0) {
              return ctx.reply(`📭 Project directory for "${targetBotName}" is empty.`);
         }
-        let message = `📁 Files in project for "${targetBotName}":
-`;
+        let message = `📁 Files in project for "${targetBotName}":\n`;
         files.forEach(file => {
-            message += `- ${file}
-`;
+            message += `- ${file}\n`;
         });
         ctx.reply(message);
     } catch (readDirError) {
@@ -758,8 +735,7 @@ bot.on('text', async (ctx) => {
         try {
             // Send the user's message as input to the bot's stdin
             if (process.stdin.writable) {
-                process.stdin.write(messageText + '
-');
+                process.stdin.write(messageText + '\n');
                 console.log(`[INPUT] Sent input "${messageText}" to bot "${botName}"`);
                 // Optionally confirm receipt
                 // ctx.reply(`✅ Input sent to "${botName}".`);
@@ -862,8 +838,7 @@ You can now:
             return;
         } else {
             // Accumulate the code text
-            const newBuffer = (state.data.codeBuffer || '') + messageText + '
-';
+            const newBuffer = (state.data.codeBuffer || '') + messageText + '\n';
             setUserState(userId, 'AWAITING_CODE_PASTE_CONTINUE', { botName, codeBuffer: newBuffer });
             // Optionally acknowledge receipt without replying every time
             // await ctx.reply(`✅ Code chunk received...`); // Might be too noisy
